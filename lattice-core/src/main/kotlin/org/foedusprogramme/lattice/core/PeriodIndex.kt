@@ -191,7 +191,9 @@ internal class PeriodIndex(
             newEraAliases.forEach(s::putEraAlias)
             newExclusions.forEach(s::putPeriodExclusion)
             write.failures.forEach(s::putPeriodFailure)
-            if (next.generation != (current?.generation ?: 0L)) s.putPeriodGeneration(chat, next.generation)
+            // deletePeriodLayer drops the generation row too: a reset always writes it back, or a reload would restart
+            // the count and an in-flight result computed against the old layer could still commit.
+            if (write.reset || next.generation != (current?.generation ?: 0L)) s.putPeriodGeneration(chat, next.generation)
             written.forEach(s::putCatalogueSnapshot)
         }
         // Committed: now (and only now) the RAM image follows.
