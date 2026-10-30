@@ -44,7 +44,14 @@ class MemoryToolsTest {
             risks = getAll<Tool>().associate { it.definition.name to it.definition.risk }
         }
 
-        assertEquals(mapOf("lattice.search" to ToolRisk.READ_ONLY, "lattice.save" to ToolRisk.AGENT_STATE), risks)
+        assertEquals(
+            mapOf(
+                "lattice.search" to ToolRisk.READ_ONLY,
+                "lattice.save" to ToolRisk.AGENT_STATE,
+                "lattice.timeline" to ToolRisk.READ_ONLY,
+            ),
+            risks,
+        )
     }
 
     @Test
