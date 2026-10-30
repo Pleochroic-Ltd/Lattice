@@ -12,7 +12,7 @@ and the memory tools refuse it; the tools are still offered, since a plugin's to
 scenes on, such a turn is left out of the scenes whole, the agent's answer in it included, and so is a turn where anyone
 below the level wrote; a scene with such a gap is untrusted. A turn with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`.
 A compaction summary is kept only when the turn that compacted reaches the memory and an earlier turn of the
-conversation did. Whatever anyone but an
+conversation did; it is saved tainted when anyone but an operator had a turn in the conversation, also before a restart. Whatever anyone but an
 operator says or saves is kept tainted, so it never comes back as trusted content.
 
 Before a message turn, Lattice recalls what the message brings
@@ -27,7 +27,8 @@ summary is kept as an episode.
 
 With scenes on, Lattice captures a conversation scene by scene instead: after each message turn it reads the
 conversation back from Alexandrite's stores, cuts what has gathered into scenes (stretches of one topic or one
-occasion), extracts the memories of each ended scene, and writes a short summary of it that recall can bring back. A
+occasion), extracts the memories of each ended scene, and writes a short summary of it that recall can bring back. What
+a scene says after untrusted content is extracted tainted too, since the agent may repeat it. A
 conversation sealed with `/new` is cut to its end. Heartbeats and sub-agent runs stay out of a chat's scenes. Whatever
 a turn or a seal leaves uncut is caught up in the nightly sleep.
 

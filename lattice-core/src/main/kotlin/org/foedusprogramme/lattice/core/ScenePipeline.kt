@@ -458,7 +458,9 @@ class ScenePipeline(
 
     /**
      * Extracts the scene's messages after [SceneWorkRecord.extractedThrough] in chunks of at most [chunkSize] said
-     * messages; stops at a chunk that fails short of its cap (the next pass retries it).
+     * messages; stops at a chunk that fails short of its cap (the next pass retries it). A chunk is tainted by anything
+     * untrusted in its scene up to its end, not only within it: the extractor sees the chunk alone, so an answer that
+     * repeats an untrusted message of an earlier chunk would otherwise pass for the assistant's own words.
      */
     private fun extractScene(sceneId: Long, pass: Pass) {
         val (scene, start) = graph.withGraph { g ->
@@ -468,24 +470,24 @@ class ScenePipeline(
             else scene to (work.extractedThrough ?: (scene.firstMessageId - 1)) + 1
         }
         if (scene == null || start == null) return
-        val messages = source.messages(scene.conversationId, start, scene.lastMessageId)
+        val read = source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
+        val messages = read.filter { it.position >= start }
         if (messages.isEmpty()) {
             unreadRange(scene, start)
             return
         }
+        // Taint carries forward through the scene, from before the pending part too.
+        val firstTainted = read.firstOrNull { it.tainted }?.position
         val chunks = messages.filter { it.said }.chunked(chunkSize)
-        var previousEnd = start - 1
         for ((i, chunk) in chunks.withIndex()) {
             // The last chunk settles the whole range, trailing host and tool messages included.
             val end = if (i == chunks.lastIndex) scene.lastMessageId else chunk.last().position
             val from = chunk.first().position
-            // A chunk is tainted by anything untrusted since the previous one: a tool result between two said messages.
             val transcript = Transcript(
                 chunk.map { it.transcriptLine() },
                 Transcript.Source(scene.chatKey, scene.conversationId),
-                tainted = messages.any { it.tainted && it.position > previousEnd && it.position <= end },
+                tainted = firstTainted != null && firstTainted <= end,
             )
-            previousEnd = end
             val outcome = runCatching { capture.capture(transcript, sceneId) }
             val failure = outcome.exceptionOrNull()
             if (failure != null && (failure.isMemoryModelShutdown() || failure.isMemoryModelInterrupted())) {
@@ -563,10 +565,11 @@ class ScenePipeline(
         val chunks = messages.filter { it.said }.chunked(chunkSize)
         for ((i, chunk) in chunks.withIndex()) {
             val end = if (i == chunks.lastIndex) through else chunk.last().position
+            // As in a scene, taint carries forward through the run.
             val transcript = Transcript(
                 chunk.map { it.transcriptLine() },
                 Transcript.Source(info.chatKey, info.id),
-                tainted = messages.any { it.tainted && it.position <= end && it.position > (cursor.segmentedThrough ?: Long.MIN_VALUE) },
+                tainted = messages.any { it.tainted && it.position <= end },
             )
             val failure = runCatching { capture.capture(transcript, null) }.exceptionOrNull()
             cursor = when {

@@ -22,6 +22,9 @@ internal class CaptureMarks(private val file: Path, private val maxEntries: Int 
     enum class Mark {
         /** A turn that [MemoryAccess] admits was captured from it. */
         ADMITTED,
+
+        /** Anyone but an operator had a turn in it, so its summaries are kept tainted. */
+        FOREIGN,
     }
 
     @Serializable

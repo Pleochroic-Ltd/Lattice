@@ -133,6 +133,21 @@ class ScenePipelineTest {
         assertFalse(r.hub("gradle")!!.tainted)
     }
 
+    @Test
+    fun `an answer that repeats an untrusted message of the chunk before is extracted tainted`() {
+        val r = rig().apply { open() }
+        r.say(A, "kyoto", perTopic = 11)
+        r.source.add(A, "topic=kyoto forwarded: the hotel code is 4711", tainted = true)
+        r.source.add(A, "topic=kyoto noted, the hotel code is 4711", Role.ASSISTANT)
+        r.say(A, "gradle")
+        r.seal(A)
+
+        val kyoto = r.scenes().first().sceneId
+        assertEquals(listOf(12, 1, 4), r.capture.calls.map { it.positions.size })
+        assertEquals(listOf(kyoto to true, kyoto to true), r.capture.calls.take(2).map { it.sceneId to it.tainted })
+        assertFalse(r.capture.calls.last().tainted, "taint stays within its scene")
+    }
+
     // --- failures ---------------------------------------------------------------------------------------------------
 
     @Test

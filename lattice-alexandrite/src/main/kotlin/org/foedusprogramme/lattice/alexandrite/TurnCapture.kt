@@ -29,7 +29,6 @@ import org.unitedsoftware.alexandrite.sdk.turn.ContextCompacted
 import org.unitedsoftware.alexandrite.sdk.turn.ConversationSealed
 import org.unitedsoftware.alexandrite.sdk.turn.TurnCommitted
 import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -63,9 +62,6 @@ internal class TurnCapture(
     /** Confined to the worker. */
     private val pending = LinkedHashMap<ConversationId, Batch>()
 
-    /** The conversations where anyone but an operator had a turn, whose summaries are kept tainted. */
-    private val foreign = ConcurrentHashMap.newKeySet<ConversationId>()
-
     /** The last compaction summary of each conversation, confined to the worker. */
     private val summaries = HashMap<ConversationId, Summary>()
 
@@ -92,7 +88,7 @@ internal class TurnCapture(
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
         if (!config.enabled || !turn.remembers()) return
-        if (taintsMemory(turn.actor)) foreign += turn.conversation
+        if (taintsMemory(turn.actor)) marks.mark(turn.conversation.value, CaptureMarks.Mark.FOREIGN)
         if (!access.admits(turn)) return
         marks.mark(turn.conversation.value, CaptureMarks.Mark.ADMITTED)
         if (scenes.live) {
@@ -112,13 +108,16 @@ internal class TurnCapture(
         if (!config.enabled || turn.lineage != null) return
         val conversation = turn.conversation
         val kept = access.admits(turn) && marks.has(conversation.value, CaptureMarks.Mark.ADMITTED)
-        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || conversation in foreign
+        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || foreign(conversation)
         offer(Event.Compacted(turn, summary.takeIf { kept }, tainted))
     }
 
     suspend fun sealed(turn: TurnInfo, sealed: ConversationId) {
-        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || sealed in foreign))
+        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || foreign(sealed)))
     }
+
+    /** Whether anyone but an operator had a turn in [conversation], so that its summaries are kept tainted. */
+    private fun foreign(conversation: ConversationId): Boolean = marks.has(conversation.value, CaptureMarks.Mark.FOREIGN)
 
     private fun offer(event: Event) {
         if (events.trySend(event).isSuccess) {
@@ -152,7 +151,6 @@ internal class TurnCapture(
             }
 
             is Event.Sealed -> {
-                foreign -= event.sealed
                 marks.forget(event.sealed.value)
                 if (scenes.live) seal(event.turn, event.sealed) else if (config.onSeal) flush(event.sealed)
                 val summary = summaries.remove(event.sealed)
