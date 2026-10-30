@@ -33,7 +33,7 @@ fun interface MemoryDeadLetter {
 /**
  * One poison-window failure. [transcript] and [rawOutput] are the diagnostic payload; both are truncated by
  * the sink so a giant window can never bloat the log. [phase] names the code path that hit it
- * ("capture-async" = live compaction, "capture-sync" = sleep catch-up / offline).
+ * ("capture" = [org.foedusprogramme.lattice.Lattice.capture]; the scene pipeline adds its own).
  */
 data class DeadLetterEntry(
     val reason: String,

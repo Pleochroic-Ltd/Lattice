@@ -40,8 +40,8 @@ object TranscriptRenderer {
      */
     const val CHUNK_LINES = 12
 
-    private const val MESSAGE_CONTEXT_HEADER = "## Message Context"
-    private const val USER_MESSAGE_HEADER = "## User Message"
+    internal const val MESSAGE_CONTEXT_HEADER = "## Message Context"
+    internal const val USER_MESSAGE_HEADER = "## User Message"
     private val WHITESPACE = Regex("\\s+")
     private val MESSAGE_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss XXX '['VV']'")
 
