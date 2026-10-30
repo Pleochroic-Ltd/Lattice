@@ -141,6 +141,28 @@ class SceneIndexReloadTest {
     }
 
     @Test
+    fun `a closed thread's resolves come back in the same order whatever order the store keeps its links in`() {
+        val store = TestLatticeStore()
+        val setup: Long
+        val before: List<Long>
+        run {
+            val g = graphOn(store)
+            setup = g.remember("用户说要给妹妹一个周末的惊喜")
+            val resolves = listOf("惊喜是河边的生日野餐", "野餐时他们看到了萤火虫").map { g.remember(it) }
+            val thread = g.putThread(ThreadRecord(id = 0, chatKey = "telegram:1", description = "周末的惊喜是什么"))
+            g.linkThread(thread, setup, ThreadRole.SETUP)
+            resolves.asReversed().forEach { g.linkThread(thread, it, ThreadRole.RESOLVE) }
+            g.putThread(g.thread(thread)!!.copy(state = ThreadState.CLOSED, closedSceneId = 4))
+            before = g.closedResolvesOf(setup)
+            assertEquals(resolves, before, "oldest first, not in link order")
+        }
+        // A store that hands the links back in another order (as SQLite does after a merge moved one).
+        val loaded = store.load()
+        val g2 = graphOn(TestLatticeStore(initial = loaded.copy(threadLinks = loaded.threadLinks.asReversed())))
+        assertEquals(before, g2.closedResolvesOf(setup))
+    }
+
+    @Test
     fun `forgetting a set-up memory deletes its links but keeps the thread`() {
         val store = TestLatticeStore()
         val config = noEncodeFold.copy(nodePruneFloor = 0.5)

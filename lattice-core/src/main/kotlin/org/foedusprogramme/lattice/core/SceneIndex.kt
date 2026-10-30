@@ -212,16 +212,22 @@ internal class SceneIndex(
 
     private fun isClosed(threadId: Long) = threadsById[threadId]?.state == ThreadState.CLOSED
 
+    /**
+     * The RESOLVE memories of the closed threads [setupId] sets up: thread by thread in id order, each thread's oldest
+     * first (then by id). Not in link order: a merge moves a link to the end here but keeps its row's place in a store,
+     * so link order changes on a reload.
+     */
     fun closedResolvesOf(setupId: Long): List<Long> {
         if (closedThreads == 0) return emptyList()
         val out = LinkedHashSet<Long>()
         for (threadId in threadsWith(setupId, ThreadRole.SETUP)) {
             if (!isClosed(threadId)) continue
-            for (l in linksByThread[threadId].orEmpty()) {
-                if (l.role != ThreadRole.RESOLVE) continue
-                val current = graph.current(l.engramId)
-                if (current != setupId && graph.engram(current)?.isEpisodeHub == false) out.add(current)
-            }
+            linksByThread[threadId].orEmpty()
+                .filter { it.role == ThreadRole.RESOLVE }
+                .mapNotNull { l -> graph.current(l.engramId).takeIf { it != setupId }?.let(graph::engram) }
+                .filter { !it.isEpisodeHub }
+                .sortedWith(compareBy<Engram> { it.createdAt }.thenBy { it.id })
+                .forEach { out.add(it.id) }
         }
         return out.toList()
     }

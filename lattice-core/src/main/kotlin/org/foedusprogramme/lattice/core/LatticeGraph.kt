@@ -2784,7 +2784,8 @@ class LatticeGraph(
 
     /**
      * The RESOLVE memories of every CLOSED thread that has [setupId] as a SETUP, currentEngram-redirected and
-     * live, in link order. Direction comes from the ledger's roles only, never from an edge.
+     * live: thread by thread, each thread's oldest first (link order is not stable across a reload). Direction comes
+     * from the ledger's roles only, never from an edge.
      */
     fun closedResolvesOf(setupId: Long): List<Long> = sceneIndex.closedResolvesOf(setupId)
 
