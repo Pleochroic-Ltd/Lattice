@@ -36,7 +36,11 @@ interface Lattice {
     /** Saves a whole conversation's summary as an episode node; null when episode nodes are off or it was a duplicate. */
     suspend fun saveEpisode(summary: String, source: Transcript.Source? = null): Long?
 
-    /** Runs the consolidation passes in [SleepPhase] order, each fail-soft; one sleep at a time per graph. */
+    /**
+     * Runs the consolidation passes in [phases], in [SleepPhase] order, each fail-soft (a failed phase is reported and
+     * the next one runs). One sleep at a time per graph: a call made while another sleep runs returns at once with
+     * every requested phase skipped. The report lists the requested phases only.
+     */
     suspend fun sleep(phases: Set<SleepPhase> = SleepPhase.entries.toSet()): SleepReport
 
     suspend fun stats(): LatticeStats
@@ -155,11 +159,16 @@ data class SleepReport(
 ) {
     data class PhaseReport(
         val phase: SleepPhase,
-        /** Skipped: turned off by settings, or the embedder was down and the phase needs it. */
+        /**
+         * Skipped: turned off by settings, it needs a model and there is none, the embedder was down and the phase needs
+         * it, another sleep was running, or the graph started closing; [skipReason] says which.
+         */
         val skipped: Boolean,
         val count: Int,
         val millis: Long,
         val error: String? = null,
+        /** Why a skipped phase was skipped, as a sentence; null when it ran. */
+        val skipReason: String? = null,
     )
 }
 

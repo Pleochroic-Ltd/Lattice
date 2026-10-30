@@ -21,6 +21,11 @@ data class LatticeSettings(
     val userName: String? = null,
     /** Names the user also goes by, folded into one entity. */
     val entitySelfAliases: Set<String> = emptySet(),
+    /**
+     * The names the assistant goes by in the conversation. Extraction writes the assistant's own memories in the first
+     * person under them ("I cried", not "Mia cried"), and entity resolution never admits them as entities.
+     */
+    val assistantNames: Set<String> = emptySet(),
     /** The zone dates in memories are written and read in. */
     val zone: ZoneId = ZoneId.systemDefault(),
     /** The language of recall markers when a call names none. */
