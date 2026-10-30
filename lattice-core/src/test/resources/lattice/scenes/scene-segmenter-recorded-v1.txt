@@ -1,0 +1,11 @@
+```json
+{
+  "continues_open_scene": false,
+  "scenes": [
+    {"start_id": 101, "end_id": 112, "title": "Planning the Kyoto trip", "synopsis": "Alex and the assistant sketch a four-day Kyoto itinerary in November: temples, a ryokan and the budget.", "ended": true},
+    {"start_id": 113, "end_id": 124, "title": "Gradle build keeps failing", "synopsis": "A KSP task fails after a Kotlin upgrade; they trace it to a stale plugin version and pin it.", "ended": true},
+    {"start_id": 125, "end_id": 132, "title": "Weeknight curry", "synopsis": "The next day Alex asks for a quick Japanese curry recipe and swaps in pumpkin.", "ended": true},
+    {"start_id": 133, "end_id": 140, "title": "Booking the ryokan", "synopsis": "Back to the trip: comparing two ryokans and deciding on the one near Arashiyama.", "ended": false}
+  ]
+}
+```
