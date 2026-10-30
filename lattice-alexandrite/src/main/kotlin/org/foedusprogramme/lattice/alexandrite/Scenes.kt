@@ -1,0 +1,317 @@
+package org.foedusprogramme.lattice.alexandrite
+
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.Json
+import org.foedusprogramme.lattice.ConversationInfo
+import org.foedusprogramme.lattice.ConversationMessage
+import org.foedusprogramme.lattice.ConversationSource
+import org.foedusprogramme.lattice.SceneTrustPolicy
+import org.slf4j.LoggerFactory
+import org.unitedsoftware.alexandrite.sdk.chat.AgentId
+import org.unitedsoftware.alexandrite.sdk.chat.ConversationId
+import org.unitedsoftware.alexandrite.sdk.chat.ToolCallId
+import org.unitedsoftware.alexandrite.sdk.chat.TurnId
+import org.unitedsoftware.alexandrite.sdk.di.Lifecycle
+import org.unitedsoftware.alexandrite.sdk.di.Singleton
+import org.unitedsoftware.alexandrite.sdk.plugin.PluginFiles
+import org.unitedsoftware.alexandrite.sdk.store.ConversationKind
+import org.unitedsoftware.alexandrite.sdk.store.ConversationState
+import org.unitedsoftware.alexandrite.sdk.store.ConversationStore
+import org.unitedsoftware.alexandrite.sdk.store.TranscriptStore
+import org.unitedsoftware.alexandrite.sdk.transcript.AssistantEntry
+import org.unitedsoftware.alexandrite.sdk.transcript.ContextPart
+import org.unitedsoftware.alexandrite.sdk.transcript.EntryId
+import org.unitedsoftware.alexandrite.sdk.transcript.EntryRecord
+import org.unitedsoftware.alexandrite.sdk.transcript.TextPart
+import org.unitedsoftware.alexandrite.sdk.transcript.ToolCallPart
+import org.unitedsoftware.alexandrite.sdk.transcript.ToolResultEntry
+import org.unitedsoftware.alexandrite.sdk.transcript.TranscriptEntry
+import org.unitedsoftware.alexandrite.sdk.transcript.UserEntry
+import org.unitedsoftware.alexandrite.sdk.transcript.UserOrigin
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.StandardOpenOption
+import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.path.exists
+import kotlin.io.path.readLines
+import org.unitedsoftware.alexandrite.sdk.store.ConversationInfo as StoredConversation
+
+/**
+ * What scenes read from Alexandrite: the host's stores, the conversations the plugin has seen and the risks of the
+ * tools it has seen offered. Scenes run when the config turns them on and the host binds a transcript and a
+ * conversation store.
+ */
+@Singleton
+internal class SceneHost(
+    config: LatticeConfig,
+    files: PluginFiles,
+    private val transcripts: TranscriptStore?,
+    private val conversations: ConversationStore?,
+) : Lifecycle {
+    private val scenes = config.scenes
+    val registry = ConversationRegistry(files.dataDir.resolve(SCENES_DIR).resolve("conversations.jsonl"))
+    val toolRisks = ToolRisks(files.dataDir.resolve(SCENES_DIR).resolve("tool-risks.json"))
+
+    /** Whether conversations are captured scene by scene. */
+    val live: Boolean = scenes.enabled && transcripts != null && conversations != null
+
+    override suspend fun onStart() {
+        if (scenes.enabled && !live) {
+            logger.warn(
+                "Scenes are on, but the host binds no transcript or conversation store, so conversations are captured " +
+                    "in batches of turns instead",
+            )
+        }
+    }
+
+    /** The source and trust policy of the graph [graph], null when scenes do not run. */
+    fun forGraph(graph: String): SceneDependencies? {
+        if (!live) return null
+        val agent = try {
+            AgentId(graph)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
+        val senders = SenderTrust()
+        return SceneDependencies(
+            AlexandriteConversationSource(agent, transcripts!!, conversations!!, registry, senders),
+            AlexandriteSceneTrustPolicy(scenes, toolRisks, senders),
+        )
+    }
+
+    /**
+     * Records [conversation] as one of its chat's and returns it, null when it is not a user-lane conversation (a
+     * heartbeat or a sub-agent run, which scenes leave out) or the store has no such conversation.
+     */
+    suspend fun register(conversation: ConversationId): RegisteredConversation? {
+        registry.find(conversation.value)?.let { return it }
+        val info = checkNotNull(conversations) { "Scenes need a conversation store." }.conversation(conversation)
+        if (info == null || info.kind != ConversationKind.USER_LANE) return null
+        return registry.add(RegisteredConversation(info.key.agent.value, info.key.chat.toString(), conversation.value))
+    }
+}
+
+internal class SceneDependencies(val source: ConversationSource, val trust: SceneTrustPolicy)
+
+/** A user-lane conversation of [agent] in [chat], the chat key it is captured under. */
+@Serializable
+internal class RegisteredConversation(val agent: String, val chat: String, val conversation: String)
+
+/**
+ * The conversations the plugin has seen, per agent and chat, in the order it saw them, kept in [file] across restarts:
+ * the SDK has no list of a chat's past conversations, which the scene catch-up needs.
+ */
+internal class ConversationRegistry(private val file: Path) {
+    private val lock = Any()
+    private var loaded: MutableList<RegisteredConversation>? = null
+
+    fun find(conversation: String): RegisteredConversation? = all().firstOrNull { it.conversation == conversation }
+
+    /** The chats of [agent], each once. */
+    fun chats(agent: AgentId): List<String> = all().filter { it.agent == agent.value }.map { it.chat }.distinct()
+
+    /** The conversation ids of [agent] in [chat], oldest first. */
+    fun conversations(agent: AgentId, chat: String): List<String> =
+        all().filter { it.agent == agent.value && it.chat == chat }.map { it.conversation }
+
+    /** Records [entry] unless its conversation is known, and returns the record kept. */
+    fun add(entry: RegisteredConversation): RegisteredConversation = synchronized(lock) {
+        val entries = entries()
+        entries.firstOrNull { it.conversation == entry.conversation }?.let { return it }
+        Files.createDirectories(file.parent)
+        Files.writeString(
+            file,
+            Json.encodeToString(RegisteredConversation.serializer(), entry) + "\n",
+            StandardOpenOption.CREATE,
+            StandardOpenOption.APPEND,
+        )
+        entries += entry
+        entry
+    }
+
+    private fun all(): List<RegisteredConversation> = synchronized(lock) { entries().toList() }
+
+    private fun entries(): MutableList<RegisteredConversation> = loaded ?: read().also { loaded = it }
+
+    private fun read(): MutableList<RegisteredConversation> {
+        if (!file.exists()) return ArrayList()
+        val lines = try {
+            file.readLines()
+        } catch (e: IOException) {
+            logger.warn("Cannot read the conversations of {}, so the scene catch-up starts from none", file, e)
+            return ArrayList()
+        }
+        return lines.filter { it.isNotBlank() }.mapNotNullTo(ArrayList()) { line ->
+            try {
+                Json.decodeFromString(RegisteredConversation.serializer(), line)
+            } catch (e: SerializationException) {
+                logger.warn("Skipping a line of {} that does not read as a conversation", file)
+                null
+            } catch (e: IllegalArgumentException) {
+                logger.warn("Skipping a line of {} that does not read as a conversation", file)
+                null
+            }
+        }
+    }
+}
+
+/** Whether the senders seen in each chat were operators or trusted users there, as their channel told. */
+internal class SenderTrust {
+    private val seen = ConcurrentHashMap<Pair<String, String>, Boolean>()
+
+    fun saw(chatKey: String, senderId: String, trusted: Boolean) {
+        seen[chatKey to senderId] = trusted
+    }
+
+    fun trusted(chatKey: String, senderId: String): Boolean = seen[chatKey to senderId] == true
+}
+
+/**
+ * The conversations of [agent] as scenes read them: the user-lane conversations the plugin has seen
+ * ([ConversationRegistry]), their entries from [transcripts] at positions that are their entry ids, and their seals and
+ * taints from [conversations]. Lattice calls it from its own threads, so each call blocks on the stores.
+ */
+internal class AlexandriteConversationSource(
+    private val agent: AgentId,
+    private val transcripts: TranscriptStore,
+    private val conversations: ConversationStore,
+    private val registry: ConversationRegistry,
+    private val senders: SenderTrust,
+) : ConversationSource {
+    override fun chats(): List<String> = registry.chats(agent)
+
+    override fun conversations(chatKey: String): List<ConversationInfo> =
+        registry.conversations(agent, chatKey).mapNotNull(::conversation)
+
+    override fun conversation(conversationId: String): ConversationInfo? = runBlocking {
+        val id = ConversationId(conversationId)
+        val info = lane(id) ?: return@runBlocking null
+        ConversationInfo(
+            id = conversationId,
+            chatKey = info.key.chat.toString(),
+            sealed = info.state == ConversationState.SEALED,
+            lastPosition = transcripts.tail(id, 1).lastOrNull()?.record?.id?.value,
+        )
+    }
+
+    override fun messages(conversationId: String, from: Long, to: Long, limit: Int): List<ConversationMessage> =
+        runBlocking {
+            val id = ConversationId(conversationId)
+            val info = lane(id)
+            if (info == null || limit <= 0 || from > to) return@runBlocking emptyList()
+            val chatKey = info.key.chat.toString()
+            val taintedFrom = conversations.taint(id)?.at
+            val entries = if (from <= 1) transcripts.entries(id) else transcripts.entriesAfter(id, EntryId(from - 1))
+            val calls = Calls()
+            val messages = ArrayList<ConversationMessage>()
+            for (entry in entries) {
+                val record = entry.record ?: continue
+                calls.add(entry)
+                val position = record.id.value
+                if (position < from) continue
+                if (position > to || messages.size >= limit) break
+                messages += message(entry, record, chatKey, taintedFrom, calls) ?: continue
+            }
+            messages
+        }
+
+    /** The conversation [id] when it is a user-lane conversation of [agent]. */
+    private suspend fun lane(id: ConversationId): StoredConversation? =
+        conversations.conversation(id)?.takeIf { it.kind == ConversationKind.USER_LANE && it.key.agent == agent }
+
+    private suspend fun message(
+        entry: TranscriptEntry,
+        record: EntryRecord,
+        chatKey: String,
+        taintedFrom: Instant?,
+        calls: Calls,
+    ): ConversationMessage? {
+        val position = record.id.value
+        // A conversation stays tainted from the first untrusted content it took in.
+        val tainted = taintedFrom != null && !record.createdAt.isBefore(taintedFrom)
+        return when (entry) {
+            is UserEntry -> when (val origin = entry.origin) {
+                is UserOrigin.FromChat -> {
+                    val sender = origin.sender
+                    val address = sender.address.toString()
+                    senders.saw(chatKey, address, sender.isOperator || sender.isTrusted)
+                    val quoted = origin.quote?.trust?.content == false
+                    ConversationMessage(
+                        position,
+                        ConversationMessage.Role.USER,
+                        entry.parts.text(),
+                        origin.receivedAt,
+                        speakerName = sender.displayName,
+                        senderId = address,
+                        tainted = tainted || origin.forwarded != null || quoted,
+                    )
+                }
+
+                is UserOrigin.Initiated -> host(entry, record, "$PLUGIN_SOURCE${origin.plugin}", tainted)
+                is UserOrigin.SystemWritten -> host(entry, record, origin.source, tainted)
+                else -> host(entry, record, null, tainted)
+            }
+
+            is AssistantEntry -> ConversationMessage(
+                position,
+                ConversationMessage.Role.ASSISTANT,
+                entry.parts.text(),
+                record.createdAt,
+                tainted = tainted,
+            )
+
+            is ToolResultEntry -> ConversationMessage(
+                position,
+                ConversationMessage.Role.TOOL,
+                entry.content.text(),
+                record.createdAt,
+                toolName = entry.toolName,
+                toolArguments = calls.of(entry.callId, record.turn)?.arguments,
+                tainted = tainted,
+            )
+
+            else -> null
+        }
+    }
+
+    private fun host(entry: UserEntry, record: EntryRecord, source: String?, tainted: Boolean) = ConversationMessage(
+        record.id.value,
+        ConversationMessage.Role.HOST,
+        entry.parts.mapNotNull { (it as? TextPart)?.text ?: (it as? ContextPart)?.text }.joinToString("\n").trim(),
+        record.createdAt,
+        senderId = source,
+        tainted = tainted,
+    )
+
+    /** The tool calls seen so far, and those of a turn whose call came before the entries read. */
+    private inner class Calls {
+        private val calls = HashMap<ToolCallId, ToolCallPart>()
+        private val turns = HashSet<TurnId>()
+
+        fun add(entry: TranscriptEntry) {
+            if (entry is AssistantEntry) entry.parts.filterIsInstance<ToolCallPart>().forEach { calls[it.id] = it }
+        }
+
+        suspend fun of(call: ToolCallId, turn: TurnId): ToolCallPart? {
+            calls[call]?.let { return it }
+            if (turns.add(turn)) transcripts.turnEntries(turn).forEach(::add)
+            return calls[call]
+        }
+    }
+
+    private companion object {
+        /** The source of a turn a plugin started: `plugin:<plugin id>`. */
+        const val PLUGIN_SOURCE = "plugin:"
+    }
+}
+
+/** The text parts, one per line. */
+private fun List<*>.text(): String = filterIsInstance<TextPart>().joinToString("\n") { it.text }.trim()
+
+private const val SCENES_DIR = "scenes"
+
+private val logger = LoggerFactory.getLogger(SceneHost::class.java)

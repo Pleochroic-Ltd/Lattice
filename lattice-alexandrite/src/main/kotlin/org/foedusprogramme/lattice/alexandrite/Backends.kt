@@ -1,6 +1,7 @@
 package org.foedusprogramme.lattice.alexandrite
 
 import org.foedusprogramme.lattice.LatticeDependencies
+import org.foedusprogramme.lattice.SceneTrustPolicy
 import org.foedusprogramme.lattice.core.BundledTexts
 import org.foedusprogramme.lattice.core.Embedder
 import org.foedusprogramme.lattice.core.FileMemoryDeadLetter
@@ -42,12 +43,13 @@ internal interface BackendFactory : AutoCloseable {
     override fun close() {}
 }
 
-/** The backends that the config names. */
+/** The backends that the config names, and the host's conversations for scenes when [scenes] runs them. */
 internal class Backends(
     private val config: LatticeConfig,
     private val dataDir: Path,
     providers: List<ModelProvider>,
     private val clock: Clock,
+    private val scenes: SceneHost? = null,
 ) : BackendFactory {
     private val endpoints: Map<EndpointId, ModelEndpoint> by lazy {
         providers.flatMap { it.endpoints }.associateBy { it.id }
@@ -69,6 +71,7 @@ internal class Backends(
     override fun dependencies(graph: String): LatticeDependencies {
         val store = store(graph)
         try {
+            val scene = scenes?.forGraph(graph)
             return LatticeDependencies(
                 store = store,
                 embedder = embedder,
@@ -77,6 +80,8 @@ internal class Backends(
                 texts = texts(),
                 deadLetter = FileMemoryDeadLetter(dataDir.resolve("dead-letters").resolve("$graph.jsonl")),
                 clock = clock,
+                conversations = scene?.source,
+                sceneTrust = scene?.trust ?: SceneTrustPolicy.Conservative,
             )
         } catch (e: Exception) {
             store.close()

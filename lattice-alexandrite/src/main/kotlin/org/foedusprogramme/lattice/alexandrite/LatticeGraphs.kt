@@ -48,8 +48,9 @@ internal class LatticeGraphs internal constructor(
         providers: List<ModelProvider>,
         opener: LatticeOpener?,
         backends: BackendFactory?,
+        scenes: SceneHost,
     ) : this(
-        backends ?: Backends(config, files.dataDir, providers, clock),
+        backends ?: Backends(config, files.dataDir, providers, clock, scenes),
         opener ?: LatticeOpener(::openLattice),
         config.settings(clock.zone),
         scope,
