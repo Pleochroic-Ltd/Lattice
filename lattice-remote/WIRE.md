@@ -63,7 +63,8 @@ whole row; a reader decodes a put from `data` and a delete from the key.
 
 `device` isn't a Lattice row: it records which device holds which `IdAllocator` slot (1..1023). A device picks a slot
 no `device` record holds and claims it with a `putRecord` against the current `baseSeq`; a `409` makes it read the
-claims again and pick anew.
+claims again and pick anew. A claim that waited in the outbox is never posted over another device's claim of the same
+slot: the client drops it and claims a new slot ahead of its other queued ops.
 
 ## Cascades
 

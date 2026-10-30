@@ -78,6 +78,35 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `a claim that waited while another device took its slot gives way, and the device takes a new slot first`() {
+        fun device(name: String, slot: Int) {
+            Files.createDirectories(dir.resolve(name))
+            Files.writeString(dir.resolve("$name/$GRAPH.device.json"), """{"deviceId":"dev-$name","slot":$slot}""")
+        }
+        device("c", 3)
+        store("c").declareEmbedding(SPEC)
+        device("a", 7)
+        device("b", 7)
+        server.failNextOps = 1
+        val a = store("a").also { it.load() }
+        assertEquals(1, a.pendingWrites, "a's claim waits in the outbox")
+        store("b").load()
+        heard.clear()
+
+        assertTrue(a.flush())
+
+        val claims = server.graph(GRAPH)!!.records("device").associate { it["slot"].toString().toInt() to it["deviceId"].toString().trim('"') }
+        assertEquals("dev-b", claims[7], "b's claim stands")
+        val slotA = claims.entries.single { it.value == "dev-a" }.key
+        assertNotEquals(7, slotA)
+        assertEquals(slotA, a.idSlot)
+        assertTrue(heard.any { it.reloaded }, "the graph is told to reload for its new slot: $heard")
+        assertTrue(Files.readString(dir.resolve("a/$GRAPH.device.json")).contains("\"slot\":$slotA"))
+        a.putEngram(engram(IdAllocator(a.idSlot).next()))
+        assertEquals(0, a.pendingWrites)
+    }
+
+    @Test
     fun `a write is one post and a batch is one post`() {
         val store = store().also { it.declareEmbedding(SPEC) }
         store.putEngram(engram(1))

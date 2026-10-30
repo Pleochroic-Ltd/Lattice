@@ -128,7 +128,7 @@ class PleochroicGraphStore(
     var failure: String? = null
         private set
 
-    private class Queued(val entry: OutboxEntry, var persisted: Boolean)
+    private class Queued(var entry: OutboxEntry, var persisted: Boolean)
 
     private sealed interface Outcome {
         data object Sent : Outcome
@@ -138,6 +138,9 @@ class PleochroicGraphStore(
         data class Retry(val after: Duration?, val reason: String) : Outcome
 
         data object Gone : Outcome
+
+        /** The queue changed under the post: send its head again. */
+        data object Requeue : Outcome
     }
 
     private class SnapshotRequired : RuntimeException()
@@ -378,7 +381,7 @@ class PleochroicGraphStore(
             while (queue.isNotEmpty()) {
                 val head = queue.first()
                 val outcome = try {
-                    send(head.entry)
+                    send(head)
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     Outcome.Retry(null, "the call was interrupted")
@@ -398,6 +401,7 @@ class PleochroicGraphStore(
                         persistQueue()
                         return false
                     }
+                    Outcome.Requeue -> continue
                     Outcome.Gone -> {
                         if (rewrite) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
                         rewrite = false
@@ -430,10 +434,10 @@ class PleochroicGraphStore(
         retryDelay = minOf(retryDelay.multipliedBy(2), options.maxRetryDelay)
     }
 
-    private fun send(entry: OutboxEntry): Outcome = try {
-        when (entry) {
+    private fun send(head: Queued): Outcome = try {
+        when (val entry = head.entry) {
             is OutboxEntry.Create -> create(entry.spec)
-            is OutboxEntry.Ops -> post(entry.ops)
+            is OutboxEntry.Ops -> post(head)
         }
     } catch (e: PleochroicUnreachableException) {
         Outcome.Retry(null, e.message ?: "Pleochroic is unreachable")
@@ -463,9 +467,12 @@ class PleochroicGraphStore(
         return Outcome.Sent
     }
 
-    private fun post(ops: List<JsonObject>): Outcome {
+    /** Posts the ops of [head], the queue's first entry, until they land or the queue changes under them. */
+    private fun post(head: Queued): Outcome {
         var conflicts = 0
         while (true) {
+            if (queue.firstOrNull() !== head) return Outcome.Requeue
+            val ops = (head.entry as? OutboxEntry.Ops)?.ops ?: return Outcome.Requeue
             try {
                 val answer = client.call("POST", "/graphs/$graphName/ops", envelope(ops)) as? JsonObject
                 answer?.long("seq")?.let { seq = it }
@@ -625,11 +632,58 @@ class PleochroicGraphStore(
         }
     }
 
-    /** Puts this device's pending writes back on top of the mirror, so they win over what they will overwrite. */
+    /**
+     * Puts this device's pending writes back on top of the mirror, so they win over what they will overwrite. A pending
+     * claim of a slot that another device's claim took first is dropped instead, and this device takes a new slot.
+     */
     private fun replayQueue() {
-        for (queued in queue) {
-            (queued.entry as? OutboxEntry.Ops)?.let { applyOps(mirror, devices, it.ops) }
+        var lost = false
+        var rewrite = false
+        val iterator = queue.iterator()
+        while (iterator.hasNext()) {
+            val queued = iterator.next()
+            val entry = queued.entry as? OutboxEntry.Ops ?: continue
+            val ops = entry.ops.filterNot(::lostClaim)
+            if (ops.size != entry.ops.size) {
+                lost = true
+                rewrite = rewrite || queued.persisted
+                if (ops.isEmpty()) {
+                    iterator.remove()
+                    continue
+                }
+                queued.entry = OutboxEntry.Ops(ops)
+            }
+            applyOps(mirror, devices, ops)
         }
+        if (lost) takeNewSlot(rewrite)
+    }
+
+    /** Whether [op] is this device's claim of a slot that another device holds. */
+    private fun lostClaim(op: JsonObject): Boolean {
+        val claim = (GraphWire.decode(op) as? WireOp.Device)?.record ?: return false
+        val holder = devices[claim.slot] ?: return false
+        return claim.deviceId == device.deviceId && holder.deviceId != device.deviceId
+    }
+
+    /**
+     * Claims a new slot ahead of every queued write but a pending create, so that it lands before any op that carries an
+     * id from it, and has the graph reloaded so that its next ids come from it.
+     */
+    private fun takeNewSlot(rewrite: Boolean) {
+        val old = device.slot
+        val claim = DeviceRecord(freeSlot(), device.deviceId, options.deviceName, Instant.now())
+        device = device.copy(slot = claim.slot)
+        files.writeDevice(device)
+        devices[claim.slot] = claim
+        val at = queue.indexOfFirst { it.entry !is OutboxEntry.Create }.let { if (it < 0) queue.size else it }
+        val persisted = rewrite || queue.any { it.persisted }
+        queue.add(at, Queued(OutboxEntry.Ops(listOf(GraphWire.putDevice(claim))), persisted))
+        if (persisted) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
+        logger.warn(
+            "Another device claimed slot {} of graph '{}' while this device's claim waited; this device takes slot {}.",
+            old, graphName, claim.slot,
+        )
+        note(RemoteChanges(emptySet(), reloaded = true))
     }
 
     /** Drops what remote writes left dangling and sends those deletes like any write. */
