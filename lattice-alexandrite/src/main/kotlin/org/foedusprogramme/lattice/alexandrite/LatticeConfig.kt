@@ -271,6 +271,8 @@ internal class RecallConfig(
     val timeoutMillis: Long = 3000,
     /** `drop` or `bake`: what an endpoint that cannot show the block for one turn alone does with it. */
     val fallback: String = DROP,
+    /** Put the chat's period catalogue into each turn's system prompt; read only with scenes on. */
+    val catalogue: Boolean = true,
 ) {
     fun check() {
         require(limit in 1..MAX_RECALL) { "recall.limit must be between 1 and $MAX_RECALL." }

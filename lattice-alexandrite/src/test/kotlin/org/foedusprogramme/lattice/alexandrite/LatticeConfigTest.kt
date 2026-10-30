@@ -73,6 +73,7 @@ class LatticeConfigTest {
         assertEquals("main", config.storage.graphName("main"))
         assertEquals(6, config.recall.limit)
         assertEquals(DROP, config.recall.fallback)
+        assertTrue(config.recall.catalogue)
         assertEquals(4, config.capture.turnsPerBatch)
         assertEquals(LocalTime.of(3, 30), config.sleep.time)
         assertEquals(ZoneOffset.UTC, config.settings(ZoneOffset.UTC).zone)
