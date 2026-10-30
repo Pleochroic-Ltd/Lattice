@@ -103,7 +103,7 @@ internal class FakeLattice(override val name: String) : Lattice {
 
     override suspend fun stats(): LatticeStats = LatticeStats(12, 30, 2, 0, 0, "bge-m3", 1024)
 
-    override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = block(LatticeGraph())
+    override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = block(LatticeGraph(LocalHashingEmbedder()))
 
     override suspend fun close() {
         closed = true
