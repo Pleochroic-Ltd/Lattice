@@ -1,5 +1,6 @@
 package org.foedusprogramme.lattice
 
+import org.foedusprogramme.lattice.core.ChatTimeline
 import org.foedusprogramme.lattice.core.Engram
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.LatticeGraph
@@ -57,6 +58,20 @@ interface Lattice {
     suspend fun sleep(phases: Set<SleepPhase> = SleepPhase.entries.toSet()): SleepReport
 
     suspend fun stats(): LatticeStats
+
+    /**
+     * The period catalogue last published for chat [chatKey] in [language] (null = [LatticeSettings.language]): its eras
+     * and periods in a few lines, for a prompt. Null when the chat has none yet, or when the period layer doesn't run
+     * (scenes off, no conversation source or no model). An in-memory read; it never waits for the graph. A period's
+     * name shows only when the scenes it was named from are trusted ([SceneTrustPolicy]), else its dates.
+     */
+    suspend fun catalogue(chatKey: String, language: Language? = null): String?
+
+    /**
+     * Chat [chatKey]'s eras, periods and scenes, each in chat order; null when the period layer doesn't run (as
+     * [catalogue]). Waits for the graph at most [LatticeSettings.graphReadTimeout], then throws [GraphBusyException].
+     */
+    suspend fun timeline(chatKey: String): ChatTimeline?
 
     /** Runs [block] on the graph thread with the live graph; for tools and inspection that need more than the above. */
     suspend fun <T> withGraph(block: (LatticeGraph) -> T): T
