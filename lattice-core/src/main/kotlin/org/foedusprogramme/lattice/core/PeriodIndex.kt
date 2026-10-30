@@ -1,7 +1,6 @@
 package org.foedusprogramme.lattice.core
 
 import java.security.MessageDigest
-import java.text.Normalizer
 import java.time.Instant
 import java.util.Locale
 
@@ -462,30 +461,12 @@ internal class PeriodIndex(
     }
 
     companion object {
-        /** Code points a name key ignores besides whitespace / control / format ones: render quotes and dots. */
-        private val KEY_IGNORED: Set<Int> = "「」『』“”‘’\"'`《》〈〉·・•".codePoints().toArray().toSet()
-
         /**
          * The comparison key of a period / era name or alias: NFKC, lower case, without whitespace, control,
          * format (bidi, zero-width) or separator code points and without render quotes / dots. Uniqueness and
          * lookup compare this key; the name itself is stored as given.
          */
-        fun nameKey(name: String): String {
-            val folded = Normalizer.normalize(name, Normalizer.Form.NFKC).lowercase(Locale.ROOT)
-            val out = StringBuilder(folded.length)
-            var i = 0
-            while (i < folded.length) {
-                val cp = folded.codePointAt(i)
-                i += Character.charCount(cp)
-                if (Character.isWhitespace(cp) || Character.isSpaceChar(cp) || cp in KEY_IGNORED) continue
-                when (Character.getType(cp).toByte()) {
-                    Character.CONTROL, Character.FORMAT, Character.LINE_SEPARATOR,
-                    Character.PARAGRAPH_SEPARATOR, Character.SURROGATE, Character.UNASSIGNED -> continue
-                }
-                out.appendCodePoint(cp)
-            }
-            return out.toString()
-        }
+        fun nameKey(name: String): String = periodNameKey(name)
 
         /** The key a catalogue language is stored and looked up under (`zh-CN`, `zh_CN` -> `zh-cn`). */
         fun languageKey(language: String): String = language.trim().lowercase(Locale.ROOT).replace('_', '-')
