@@ -68,6 +68,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resumeWithException
 import kotlin.time.Duration
 import kotlin.time.TimeSource
@@ -201,25 +202,41 @@ internal class DefaultLattice(
     /**
      * The graph for code that blocks instead of suspending (the scene pipeline on the capture and narration threads):
      * each block runs on the graph thread and the caller waits for it. Never call it on the graph thread itself.
+     *
+     * An interrupt withdraws a block that has not started: it never runs, and the call throws
+     * [MemoryModelInterruptedException]. A block that has started is waited for and its outcome returned, with the
+     * interrupt flag set again: a caller must never report as failed a write that landed.
      */
     internal val graphAccess: GraphAccess = object : GraphAccess {
         override fun <T> withGraph(block: (LatticeGraph) -> T): T {
             check(Thread.currentThread() !== graphThread) {
                 "GraphAccess.withGraph was called on the graph thread of '$name', which would wait for itself."
             }
-            val task = FutureTask(Callable { block(graph) })
+            val state = AtomicInteger(QUEUED)
+            val task = FutureTask(Callable { if (state.compareAndSet(QUEUED, STARTED)) block(graph) else null })
             try {
                 graphExecutor.execute(task)
             } catch (e: RejectedExecutionException) {
                 throw IllegalStateException("Lattice '$name' is closed; open the graph again to use it.", e)
             }
-            return try {
-                task.get()
+            var interrupted = false
+            try {
+                while (true) {
+                    try {
+                        @Suppress("UNCHECKED_CAST")
+                        return task.get() as T
+                    } catch (e: InterruptedException) {
+                        interrupted = true
+                        if (state.compareAndSet(QUEUED, WITHDRAWN)) {
+                            task.cancel(false)
+                            throw MemoryModelInterruptedException("Waiting for the graph of '$name' was interrupted.", e)
+                        }
+                    }
+                }
             } catch (e: ExecutionException) {
                 throw e.cause ?: e
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw MemoryModelInterruptedException("Waiting for the graph of '$name' was interrupted.", e)
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt()
             }
         }
     }
@@ -982,6 +999,11 @@ internal class DefaultLattice(
     }
 
     companion object {
+        /** A [graphAccess] block's state: waiting on the graph thread, running there, or withdrawn by an interrupt. */
+        private const val QUEUED = 0
+        private const val STARTED = 1
+        private const val WITHDRAWN = 2
+
         /** Salience of an episode node (a whole-conversation summary). */
         private const val EPISODE_SALIENCE = 0.6
 
