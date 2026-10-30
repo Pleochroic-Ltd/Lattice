@@ -26,7 +26,7 @@ class TimelineToolTest {
 
     private suspend fun PluginHarness.Running.call(
         vararg arguments: Pair<String, Any>,
-        context: ToolContext = testToolContext(),
+        context: ToolContext = testToolContext(operatorTurn()),
     ): ToolResult {
         val json = JsonObject(
             arguments.associate { (name, value) ->
@@ -78,7 +78,7 @@ class TimelineToolTest {
     fun `no arguments list the eras and periods, withholding untrusted names`() {
         val asked = mutableListOf<String>()
         main.timelines = { asked += it; timeline }
-        val context = testToolContext()
+        val context = testToolContext(operatorTurn())
 
         latticeHarness(config(SCENES_ON), opener).execute {
             val text = call(context = context).text
@@ -105,7 +105,7 @@ class TimelineToolTest {
     @Test
     fun `a period found by name lists its scenes, an untrusted one by its date only`() {
         main.timelines = { timeline }
-        val context = testToolContext()
+        val context = testToolContext(operatorTurn())
 
         latticeHarness(config(SCENES_ON), opener).execute {
             val text = call("period" to "curry", context = context).text
@@ -129,8 +129,8 @@ class TimelineToolTest {
     @Test
     fun `a withheld period is found by a date only, and its page is untrusted`() {
         main.timelines = { timeline }
-        val byName = testToolContext()
-        val byDate = testToolContext()
+        val byName = testToolContext(operatorTurn())
+        val byDate = testToolContext(operatorTurn())
 
         latticeHarness(config(SCENES_ON), opener).execute {
             assertContains(call("period" to "Plotting", context = byName).text, "No period matches \"Plotting\"")

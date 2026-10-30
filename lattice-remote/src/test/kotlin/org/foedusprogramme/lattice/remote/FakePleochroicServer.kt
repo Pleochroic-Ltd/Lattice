@@ -48,6 +48,9 @@ class FakePleochroicServer(val token: String = "test-key", private val dimension
     @Volatile
     var rejectNextOps = 0
 
+    @Volatile
+    var unauthorizedNextOps = 0
+
     val baseUrl: String get() = "http://127.0.0.1:${server.address.port}/v1"
 
     fun client(): PleochroicClient = PleochroicClient(token, baseUrl)
@@ -111,6 +114,9 @@ class FakePleochroicServer(val token: String = "test-key", private val dimension
     }
 
     fun graph(name: String): Graph? = synchronized(this) { graphs[name] }
+
+    /** Deletes the graph [name], as its owner can on the service. */
+    fun delete(name: String) = synchronized(this) { graphs.remove(name) }
 
     /** Drops every op logged so far, as compaction past the retention would. */
     fun compact(name: String) = synchronized(this) {
@@ -190,6 +196,10 @@ class FakePleochroicServer(val token: String = "test-key", private val dimension
         if (failNextOps > 0) {
             failNextOps--
             return respond(exchange, 503, error("upstream_error", "Failed for the test."))
+        }
+        if (unauthorizedNextOps > 0) {
+            unauthorizedNextOps--
+            return respond(exchange, 401, error("unauthorized", "The key was revoked for the test."))
         }
         if (rejectNextOps > 0) {
             rejectNextOps--

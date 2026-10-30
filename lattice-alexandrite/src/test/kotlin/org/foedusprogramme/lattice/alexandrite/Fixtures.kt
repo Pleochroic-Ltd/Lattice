@@ -3,6 +3,7 @@
 package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -10,6 +11,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.foedusprogramme.lattice.Lattice
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.LatticeSettings
@@ -24,11 +26,18 @@ import org.foedusprogramme.lattice.Transcript
 import org.foedusprogramme.lattice.core.ChatTimeline
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.LatticeGraph
+import org.foedusprogramme.lattice.core.LatticeStore
 import org.foedusprogramme.lattice.core.LocalHashingEmbedder
 import org.foedusprogramme.lattice.core.MemoryTexts
 import org.foedusprogramme.lattice.core.NoOpLatticeStore
 import org.unitedsoftware.alexandrite.sdk.AlexandriteSdk
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
+import org.unitedsoftware.alexandrite.sdk.chat.ChatAddress
+import org.unitedsoftware.alexandrite.sdk.chat.ChatUser
+import org.unitedsoftware.alexandrite.sdk.chat.ConversationId
+import org.unitedsoftware.alexandrite.sdk.chat.TurnId
+import org.unitedsoftware.alexandrite.sdk.chat.TurnInfo
+import org.unitedsoftware.alexandrite.sdk.chat.TurnKind
 import org.unitedsoftware.alexandrite.sdk.config.ConfigSectionSpec
 import org.unitedsoftware.alexandrite.sdk.di.container.Binding
 import org.unitedsoftware.alexandrite.sdk.di.container.instanceBinding
@@ -37,9 +46,13 @@ import org.unitedsoftware.alexandrite.sdk.plugin.PluginIds
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginIndex
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginInfo
 import org.unitedsoftware.alexandrite.testkit.PluginHarness
+import org.unitedsoftware.alexandrite.testkit.testChat
+import org.unitedsoftware.alexandrite.testkit.testTurn
+import org.unitedsoftware.alexandrite.testkit.testUser
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 /** A config with an embedder and no model. */
@@ -57,6 +70,10 @@ internal fun config(extra: String): String {
     return JsonObject(base + more).toString()
 }
 
+/** The config [json] with `access` set to [level]. */
+internal fun withAccess(level: String, json: String = BASE_CONFIG): String =
+    JsonObject((Json.parseToJsonElement(json) as JsonObject) + ("access" to JsonPrimitive(level))).toString()
+
 /** A graph in memory that records what it is asked. */
 internal class FakeLattice(override val name: String) : Lattice {
     /** What a recall answers, by its cue and options. */
@@ -71,6 +88,14 @@ internal class FakeLattice(override val name: String) : Lattice {
     @Volatile
     var timelines: suspend (String) -> ChatTimeline? = { null }
 
+    /** Suspends each capture until it completes, when set. */
+    @Volatile
+    var captureGate: CompletableDeferred<Unit>? = null
+
+    /** How long [close] takes. */
+    @Volatile
+    var closeDelay: Duration = Duration.ZERO
+
     /** Suspends each sleep until it completes, when set. */
     @Volatile
     var sleepGate: CompletableDeferred<Unit>? = null
@@ -79,6 +104,9 @@ internal class FakeLattice(override val name: String) : Lattice {
     val remembered = CopyOnWriteArrayList<Pair<String, RememberOptions>>()
     val captures = MutableStateFlow<List<Transcript>>(emptyList())
     val episodes = MutableStateFlow<List<Pair<String, Transcript.Source?>>>(emptyList())
+
+    /** Whether each saved episode was tainted, in the order of [episodes]. */
+    val episodeTaints = CopyOnWriteArrayList<Boolean>()
     val sleeps = MutableStateFlow(0)
     val sealed = MutableStateFlow<List<String>>(emptyList())
 
@@ -96,6 +124,7 @@ internal class FakeLattice(override val name: String) : Lattice {
     }
 
     override suspend fun capture(transcript: Transcript): Int {
+        captureGate?.await()
         captures.update { it + transcript }
         return transcript.lines.size
     }
@@ -104,7 +133,8 @@ internal class FakeLattice(override val name: String) : Lattice {
         sealed.update { it + conversationId }
     }
 
-    override suspend fun saveEpisode(summary: String, source: Transcript.Source?): Long? {
+    override suspend fun saveEpisode(summary: String, source: Transcript.Source?, tainted: Boolean): Long? {
+        episodeTaints += tainted
         episodes.update { it + (summary to source) }
         return 1
     }
@@ -124,6 +154,7 @@ internal class FakeLattice(override val name: String) : Lattice {
     override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = block(LatticeGraph(LocalHashingEmbedder()))
 
     override suspend fun close() {
+        delay(closeDelay)
         closed = true
     }
 
@@ -153,12 +184,38 @@ internal class FakeOpener : LatticeOpener {
     }
 
     fun graph(name: String): FakeLattice = graphs.getOrPut(name) { FakeLattice(name) }
+
+    /** The graphs reloaded, in order. */
+    val reloads = MutableStateFlow<List<String>>(emptyList())
+
+    override suspend fun reload(lattice: Lattice) {
+        reloads.update { it + lattice.name }
+    }
 }
 
-/** Dependencies that need nothing outside the test. */
-internal class FakeBackends(private val stored: List<String> = emptyList()) : BackendFactory {
-    override fun dependencies(graph: String): LatticeDependencies =
-        LatticeDependencies(NoOpLatticeStore, LocalHashingEmbedder(), null, texts = KeyTexts)
+/** Dependencies that need nothing outside the test; a graph's store is remote when [pull] is set. */
+internal class FakeBackends(
+    private val stored: List<String> = emptyList(),
+    private val pull: ((String) -> Boolean)? = null,
+) : BackendFactory {
+    /** The sync of each graph opened, by graph name. */
+    val syncs = ConcurrentHashMap<String, GraphSync>()
+
+    /** The graphs whose stores were closed, in order. */
+    val closedStores = CopyOnWriteArrayList<String>()
+
+    override fun dependencies(graph: String, sync: GraphSync?): LatticeDependencies {
+        if (sync != null) {
+            syncs[graph] = sync
+            pull?.let { pull -> sync.attach { pull(graph) } }
+        }
+        val store = object : LatticeStore by NoOpLatticeStore {
+            override fun close() {
+                closedStores += graph
+            }
+        }
+        return LatticeDependencies(store, LocalHashingEmbedder(), null, texts = KeyTexts)
+    }
 
     override fun storedGraphs(): List<String> = stored
 }
@@ -196,6 +253,21 @@ internal fun latticeHarness(
 
 internal fun PluginHarness.execute(block: suspend PluginHarness.Running.() -> Unit) {
     runBlocking { withTimeout(30.seconds) { run(block) } }
+}
+
+/** An operator of the test chats. */
+internal val OPERATOR: ChatUser = testUser("owner", isOperator = true)
+
+/** [testTurn] whose actor is [OPERATOR]. */
+internal fun operatorTurn(
+    kind: TurnKind = TurnKind.MESSAGE,
+    chat: ChatAddress = testChat(),
+    id: TurnId = TurnId("test-turn"),
+    conversation: ConversationId = ConversationId("test"),
+    block: TurnInfo.Builder.() -> Unit = {},
+): TurnInfo = testTurn(kind, chat, id, conversation) {
+    actor(OPERATOR)
+    block()
 }
 
 internal fun hit(id: Long, content: String): RecallHit = RecallHit(id, content, 1.0, null, null, null, null, null)

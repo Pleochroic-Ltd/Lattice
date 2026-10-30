@@ -25,7 +25,11 @@ import java.util.concurrent.ConcurrentHashMap
 /** Recalls what the input of each message turn brings back and adds it to the turn's context. */
 @Singleton
 @Contribute(Hook::class)
-internal class RecallInjector(config: LatticeConfig, private val graphs: LatticeGraphs) : InterceptorHook<TurnContext> {
+internal class RecallInjector(
+    config: LatticeConfig,
+    private val graphs: LatticeGraphs,
+    private val access: MemoryAccess,
+) : InterceptorHook<TurnContext> {
     private val recall = config.recall
     private val language = Language(recall.language)
     private val fallback = if (recall.fallback == BAKE) TurnContextFallback.BAKE else TurnContextFallback.DROP
@@ -38,7 +42,7 @@ internal class RecallInjector(config: LatticeConfig, private val graphs: Lattice
     override suspend fun intercept(payload: TurnContext): HookDecision<TurnContext> {
         val turn = payload.turn
         val cue = payload.text.trim()
-        if (!recall.enabled || !turn.remembers() || cue.isEmpty()) return HookDecision.Continue
+        if (!recall.enabled || !turn.remembers() || !access.admits(turn) || cue.isEmpty()) return HookDecision.Continue
         val found = recall(turn, cue) ?: return HookDecision.Continue
         if (found.text.isBlank()) return HookDecision.Continue
         val trust = if (found.tainted) Trust.UNTRUSTED else Trust.TRUSTED

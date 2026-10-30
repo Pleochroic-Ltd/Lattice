@@ -24,7 +24,11 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @Singleton
 @Contribute(Hook::class)
-internal class CatalogueInjector(config: LatticeConfig, private val graphs: LatticeGraphs) : InterceptorHook<PromptSections> {
+internal class CatalogueInjector(
+    config: LatticeConfig,
+    private val graphs: LatticeGraphs,
+    private val access: MemoryAccess,
+) : InterceptorHook<PromptSections> {
     private val enabled = config.scenes.enabled && config.recall.catalogue
     private val language = Language(config.recall.language)
     private val readTimeout = config.recall.timeout
@@ -39,7 +43,9 @@ internal class CatalogueInjector(config: LatticeConfig, private val graphs: Latt
 
     override suspend fun intercept(payload: PromptSections): HookDecision<PromptSections> {
         val turn = payload.turn
-        if (!enabled || turn.lineage != null || payload.sections.any { it.id == SECTION_ID }) return HookDecision.Continue
+        if (!enabled || turn.lineage != null || !access.admits(turn) || payload.sections.any { it.id == SECTION_ID }) {
+            return HookDecision.Continue
+        }
         val text = catalogue(turn) ?: return HookDecision.Continue
         return HookDecision.Replace(payload.withSections(payload.sections + PromptSection(SECTION_ID, text, stable = true)))
     }

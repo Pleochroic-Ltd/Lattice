@@ -33,6 +33,7 @@ import org.unitedsoftware.alexandrite.sdk.transcript.UserOrigin
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -60,12 +61,24 @@ internal class SceneHost(
     val live: Boolean = scenes.enabled && transcripts != null && conversations != null
 
     override suspend fun onStart() {
-        if (scenes.enabled && !live) {
-            logger.warn(
-                "Scenes are on, but the host binds no transcript or conversation store, so conversations are captured " +
-                    "in batches of turns instead",
-            )
-        }
+        storesWarning()?.let { logger.warn(it) }
+    }
+
+    /**
+     * What Lattice goes without when the host binds no conversation or transcript store: the SDK reserves them for the
+     * agent, so a host may keep them from plugins. Null when both are bound.
+     */
+    fun storesWarning(): String? {
+        val missing = listOfNotNull(
+            "conversation store".takeIf { conversations == null },
+            "transcript store".takeIf { transcripts == null },
+        )
+        if (missing.isEmpty()) return null
+        val effects = listOfNotNull(
+            "every captured turn and summary counts as tainted".takeIf { conversations == null },
+            "conversations are captured in batches of turns instead of scenes".takeIf { scenes.enabled },
+        ).ifEmpty { listOf("scenes cannot be turned on") }
+        return "The host binds no ${missing.joinToString(" and ")} to plugins, so ${effects.joinToString(" and ")}"
     }
 
     /** The source and trust policy of the graph [graph], null when scenes do not run. */
@@ -103,9 +116,10 @@ internal class RegisteredConversation(val agent: String, val chat: String, val c
 
 /**
  * The conversations the plugin has seen, per agent and chat, in the order it saw them, kept in [file] across restarts:
- * the SDK has no list of a chat's past conversations, which the scene catch-up needs.
+ * the SDK has no list of a chat's past conversations, which the scene catch-up needs. It keeps the latest [maxEntries];
+ * the oldest, long sealed and caught up, are forgotten.
  */
-internal class ConversationRegistry(private val file: Path) {
+internal class ConversationRegistry(private val file: Path, private val maxEntries: Int = MAX_CONVERSATIONS) {
     private val lock = Any()
     private var loaded: MutableList<RegisteredConversation>? = null
 
@@ -130,7 +144,17 @@ internal class ConversationRegistry(private val file: Path) {
             StandardOpenOption.APPEND,
         )
         entries += entry
+        if (entries.size > maxEntries) {
+            entries.subList(0, entries.size - maxEntries).clear()
+            rewrite(entries)
+        }
         entry
+    }
+
+    private fun rewrite(entries: List<RegisteredConversation>) {
+        val temp = file.resolveSibling("${file.fileName}.tmp")
+        Files.writeString(temp, entries.joinToString("") { Json.encodeToString(RegisteredConversation.serializer(), it) + "\n" })
+        Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     }
 
     private fun all(): List<RegisteredConversation> = synchronized(lock) { entries().toList() }
@@ -240,6 +264,7 @@ internal class AlexandriteConversationSource(
                     val address = sender.address.toString()
                     senders.saw(chatKey, address, sender.isOperator || sender.isTrusted)
                     val quoted = origin.quote?.trust?.content == false
+                    // Whatever anyone but an operator says is kept tainted, so it never comes back as trusted context.
                     ConversationMessage(
                         position,
                         ConversationMessage.Role.USER,
@@ -247,7 +272,7 @@ internal class AlexandriteConversationSource(
                         origin.receivedAt,
                         speakerName = sender.displayName,
                         senderId = address,
-                        tainted = tainted || origin.forwarded != null || quoted,
+                        tainted = tainted || origin.forwarded != null || quoted || taintsMemory(sender),
                     )
                 }
 
@@ -313,5 +338,6 @@ internal class AlexandriteConversationSource(
 private fun List<*>.text(): String = filterIsInstance<TextPart>().joinToString("\n") { it.text }.trim()
 
 private const val SCENES_DIR = "scenes"
+private const val MAX_CONVERSATIONS = 20_000
 
 private val logger = LoggerFactory.getLogger(SceneHost::class.java)

@@ -155,8 +155,12 @@ internal class DefaultLattice(
     private val entityResolver = model?.let { EntityResolver(it, settings.assistantNames) }
     private val aliasResolver = model?.let { EntityAliasResolver(it) }
 
-    /** The live graph; touched only on the graph thread (and [LatticeGraph.vote] from the judge pool). */
-    private val graph: LatticeGraph
+    /**
+     * The live graph; touched only on the graph thread (and [LatticeGraph.vote] from the judge pool), and replaced there
+     * by [reload].
+     */
+    @Volatile
+    private var graph: LatticeGraph
 
     /** The event months the dialogue has been dwelling on, for bare back-references; graph thread only. */
     private val focusStack = FocusStack()
@@ -557,11 +561,14 @@ internal class DefaultLattice(
      * A durable, theme-recallable summary of one whole conversation, kept off the structural graph and ranked below
      * specific facts. [source] names the conversation for the scene pipeline; the episode itself carries no anchor.
      */
-    override suspend fun saveEpisode(summary: String, source: Transcript.Source?): Long? = call {
+    override suspend fun saveEpisode(summary: String, source: Transcript.Source?, tainted: Boolean): Long? = call {
         if (!settings.episodicSessionNodes || summary.isBlank()) return@call null
         onGraphBounded { g ->
             val before = g.size
-            val id = g.remember(summary, EPISODE_SALIENCE, Engram.Layer.SEMANTIC, isEpisode = true, origin = Engram.Origin.EXTRACTED)
+            val id = g.remember(
+                summary, EPISODE_SALIENCE, Engram.Layer.SEMANTIC,
+                isEpisode = true, origin = Engram.Origin.EXTRACTED, tainted = tainted,
+            )
             if (g.size > before) id else null
         }
     }
@@ -839,6 +846,26 @@ internal class DefaultLattice(
     }
 
     override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = call { onGraphBounded(block) }
+
+    // --- Reload ------------------------------------------------------------------------------------------------------
+
+    /** The graph's tuning, to build it again in [reload]. */
+    private val reloadConfig: LatticeGraph.Config = graphConfig ?: graphConfig(settings, texts)
+
+    /**
+     * Builds the graph again from the store, on the graph thread after the work queued before it, keeping the settings,
+     * the threads and the scene work: for a store that other writers change, once it reports their changes. The
+     * published period catalogues are seeded again from the store. A store that cannot load keeps the graph as it was
+     * and throws.
+     */
+    internal suspend fun reload(): Unit = call {
+        onGraph {
+            val fresh = LatticeGraph(embedder, reloadConfig, now, store, model?.let { ModelMergeJudge(it, dependencies.judgeModelId) })
+            graph = fresh
+            periods?.publisher?.reseed(fresh)
+            logger.info("Lattice {} reloaded its graph from the store: {} engrams", name, fresh.size)
+        }
+    }
 
     // --- Lifecycle ---------------------------------------------------------------------------------------------------
 

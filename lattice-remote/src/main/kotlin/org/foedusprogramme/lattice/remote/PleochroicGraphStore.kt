@@ -53,7 +53,12 @@ import kotlin.concurrent.withLock
  * into the mirror, this device's pending ops are put back on top (last writer wins per row), and the post is retried.
  * A write the service can't take now (no network, `429`, `5xx`) goes to a durable outbox in [stateDir] and is sent,
  * in order, before the next write or by [flush]; such failures never reach the caller, and writes back off while the
- * service is down. A post refused as malformed (`400`, `413`) is set aside in `<name>.rejected.jsonl`.
+ * service is down. A post refused as malformed (`400`, `413`) is set aside in `<name>.rejected.jsonl`. A graph that is
+ * gone from the service (`404` to a post or a pull) was deleted there: the store moves its outbox and copy aside, stops
+ * writing and says why in [failure]; it never creates the graph again under the deleted one's ops. A `401` or `403` (a key
+ * the service refuses) waits in the outbox like any failure, but is a setup error that [failure] names until a post
+ * lands. The outbox takes at most [Options.maxOutboxOps] ops and [Options.maxOutboxBytes] bytes: past either, later
+ * writes stay on this device until it drains (lost at a restart), the oldest are kept, and [failure] says so.
  *
  * **Other devices' writes** reach the mirror on a conflict, on [pullRemoteChanges] and on a later [load]. Those
  * found during a write or [flush] are told to [onRemoteChange] after the call returns, on the calling thread; the
@@ -81,6 +86,9 @@ class PleochroicGraphStore(
         val deviceName: String? = null,
         /** Keep a copy of the graph in the state directory, to open without the network. */
         val cacheSnapshot: Boolean = true,
+        /** The most ops and bytes the outbox keeps while the service doesn't take them; later writes stay local. */
+        val maxOutboxOps: Int = 200_000,
+        val maxOutboxBytes: Long = 128L * 1024 * 1024,
     )
 
     /** Other devices' writes that reached the mirror: the ids they touched, or the whole graph when [reloaded]. */
@@ -119,15 +127,50 @@ class PleochroicGraphStore(
     private var retryDelay: Duration = options.minRetryDelay
     private var notice = RemoteChanges.NONE
     private var pulling = false
+    private var gone = false
 
-    private class Queued(val entry: OutboxEntry, var persisted: Boolean)
+    @Volatile
+    private var goneReason: String? = null
+
+    @Volatile
+    private var authReason: String? = null
+
+    @Volatile
+    private var overflowReason: String? = null
+    private var overflowed = 0
+
+    /** Why this store doesn't get its writes to Pleochroic, null while it does: a deleted graph, a refused key, a full outbox. */
+    val failure: String? get() = goneReason ?: authReason ?: overflowReason
+
+    private class Queued(entry: OutboxEntry, var persisted: Boolean) {
+        var entry: OutboxEntry = entry
+            set(value) {
+                field = value
+                bytes = sizeOf(value)
+            }
+
+        var bytes: Long = sizeOf(entry)
+            private set
+
+        val ops: Int get() = (entry as? OutboxEntry.Ops)?.ops?.size ?: 0
+
+        private companion object {
+            fun sizeOf(entry: OutboxEntry): Long =
+                (entry as? OutboxEntry.Ops)?.ops?.sumOf { it.toString().length + 1L } ?: 0L
+        }
+    }
 
     private sealed interface Outcome {
         data object Sent : Outcome
 
         data class Rejected(val reason: String) : Outcome
 
-        data class Retry(val after: Duration?, val reason: String) : Outcome
+        data class Retry(val after: Duration?, val reason: String, val refusedKey: Boolean = false) : Outcome
+
+        data object Gone : Outcome
+
+        /** The queue changed under the post: send its head again. */
+        data object Requeue : Outcome
     }
 
     private class SnapshotRequired : RuntimeException()
@@ -178,7 +221,7 @@ class PleochroicGraphStore(
                 try {
                     sync()
                 } catch (e: RuntimeException) {
-                    if (!transient(e)) throw e
+                    if (!transient(e) && !refusedKey(e)) throw e
                     logger.warn("Graph '{}' loads as last seen: Pleochroic is unreachable ({}).", graphName, e.message)
                 }
             }
@@ -211,7 +254,7 @@ class PleochroicGraphStore(
             try {
                 sync()
             } catch (e: RuntimeException) {
-                if (!transient(e)) throw e
+                if (!transient(e) && !refusedKey(e)) throw e
                 logger.warn("Graph '{}' couldn't pull other devices' writes: {}", graphName, e.message)
             }
             val found = notice
@@ -282,6 +325,27 @@ class PleochroicGraphStore(
         closed = true
     }
 
+    /**
+     * Saves the outbox and the graph's copy to the state directory without calling the service, then closes: for a
+     * host that stops before [close] could run. Gives up when another call holds the store for more than [wait].
+     */
+    fun closeOffline(wait: Duration = Duration.ofSeconds(2)) {
+        if (!lock.tryLock(wait.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            logger.warn("Graph '{}' is still busy, so its unsent writes stay where they were last saved.", graphName)
+            return
+        }
+        try {
+            if (closed) return
+            if (opened) {
+                persistQueue()
+                if (options.cacheSnapshot) runCatching { writeCache() }.onFailure { logger.warn("Graph '{}' couldn't save its copy: {}", graphName, it.message) }
+            }
+            closed = true
+        } finally {
+            lock.unlock()
+        }
+    }
+
     // -- Writing --------------------------------------------------------------
 
     private fun write(block: () -> Unit): Unit = locked {
@@ -303,8 +367,17 @@ class PleochroicGraphStore(
     private fun takeCollected(): List<Change> = collected.toList().also { collected.clear() }
 
     private fun submit(changes: List<Change>) {
-        if (changes.isEmpty()) return
+        if (changes.isEmpty() || gone) return
         val chunks = chunk(changes.map(GraphWire::encode))
+        if (queue.isNotEmpty()) {
+            val ops = queue.sumOf { it.ops } + changes.size
+            val bytes = queue.sumOf { it.bytes } + chunks.sumOf { chunk -> chunk.sumOf { it.toString().length + 1L } }
+            if (ops > options.maxOutboxOps || bytes > options.maxOutboxBytes) {
+                overflow(changes.size)
+                flushQueue(force = false)
+                return
+            }
+        }
         if (chunks.size > 1) {
             logger.warn(
                 "A batch of {} ops on graph '{}' is past the service's per-post limits and goes as {} posts; each lands on its own.",
@@ -336,6 +409,7 @@ class PleochroicGraphStore(
 
     /** Sends the queue in order and says whether it emptied; a failure keeps the rest in the outbox, never throws. */
     private fun flushQueue(force: Boolean): Boolean {
+        if (gone) return false
         if (queue.isEmpty()) return true
         if (!force && retryAt?.isAfter(Instant.now()) == true) {
             persistQueue()
@@ -346,7 +420,7 @@ class PleochroicGraphStore(
             while (queue.isNotEmpty()) {
                 val head = queue.first()
                 val outcome = try {
-                    send(head.entry)
+                    send(head)
                 } catch (e: InterruptedException) {
                     Thread.currentThread().interrupt()
                     Outcome.Retry(null, "the call was interrupted")
@@ -361,17 +435,31 @@ class PleochroicGraphStore(
                         files.appendRejected(head.entry, outcome.reason)
                     }
                     is Outcome.Retry -> {
-                        backOff(outcome.after)
+                        if (outcome.refusedKey) {
+                            backOff(options.maxRetryDelay)
+                            refused(outcome.reason)
+                        } else {
+                            backOff(outcome.after)
+                        }
                         logger.warn("Graph '{}' keeps {} write(s) in its outbox: {}", graphName, queue.size, outcome.reason)
                         persistQueue()
+                        return false
+                    }
+                    Outcome.Requeue -> continue
+                    Outcome.Gone -> {
+                        if (rewrite) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
+                        rewrite = false
+                        markGone()
                         return false
                     }
                 }
                 queue.removeFirst()
                 if (head.persisted) rewrite = true
+                authReason = null
             }
             retryAt = null
             retryDelay = options.minRetryDelay
+            drained()
             return true
         } finally {
             if (rewrite) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
@@ -379,6 +467,7 @@ class PleochroicGraphStore(
     }
 
     private fun persistQueue() {
+        if (gone) return
         val fresh = queue.filter { !it.persisted }
         if (fresh.isEmpty()) return
         files.appendOutbox(fresh.map { it.entry })
@@ -391,10 +480,10 @@ class PleochroicGraphStore(
         retryDelay = minOf(retryDelay.multipliedBy(2), options.maxRetryDelay)
     }
 
-    private fun send(entry: OutboxEntry): Outcome = try {
-        when (entry) {
+    private fun send(head: Queued): Outcome = try {
+        when (val entry = head.entry) {
             is OutboxEntry.Create -> create(entry.spec)
-            is OutboxEntry.Ops -> post(entry.ops)
+            is OutboxEntry.Ops -> post(head)
         }
     } catch (e: PleochroicUnreachableException) {
         Outcome.Retry(null, e.message ?: "Pleochroic is unreachable")
@@ -402,8 +491,37 @@ class PleochroicGraphStore(
         classify(e)
     }
 
-    private fun classify(e: PleochroicApiException): Outcome =
-        if (e.status == 400 || e.status == 413 || e.status == 422) Outcome.Rejected(e.message ?: e.code) else Outcome.Retry(e.retryAfter, e.message ?: e.code)
+    private fun classify(e: PleochroicApiException): Outcome = when {
+        e.status == 400 || e.status == 413 || e.status == 422 -> Outcome.Rejected(e.message ?: e.code)
+        refusedKey(e) -> Outcome.Retry(e.retryAfter, e.message ?: e.code, refusedKey = true)
+        else -> Outcome.Retry(e.retryAfter, e.message ?: e.code)
+    }
+
+    /** The service refused the API key: a setup error, said once until a post lands. */
+    private fun refused(reason: String) {
+        if (authReason != null) return
+        authReason = "Pleochroic refused the API key for graph '$graphName' ($reason), so its writes wait on this device; " +
+            "set a valid key for the account, then the outbox is sent."
+        logger.error(authReason)
+    }
+
+    /** The outbox is full: [ops] more ops stay on this device only, and the first such write says so once. */
+    private fun overflow(ops: Int) {
+        overflowed += ops
+        if (overflowReason != null) return
+        overflowReason = "Graph '$graphName' has as many writes waiting for Pleochroic as its outbox keeps " +
+            "(${options.maxOutboxOps} ops or ${options.maxOutboxBytes / (1024 * 1024)} MiB), so later writes stay on this " +
+            "device only and are lost at a restart" + (authReason?.let { ": $it" } ?: "; check the connection to the service.")
+        logger.error(overflowReason)
+    }
+
+    /** The outbox emptied: a full one takes writes again. */
+    private fun drained() {
+        if (overflowReason == null) return
+        logger.warn("Graph '{}' sent its outbox; {} op(s) made while it was full never reached Pleochroic.", graphName, overflowed)
+        overflowReason = null
+        overflowed = 0
+    }
 
     private fun create(spec: EmbeddingSpec): Outcome {
         try {
@@ -424,10 +542,12 @@ class PleochroicGraphStore(
         return Outcome.Sent
     }
 
-    private fun post(ops: List<JsonObject>): Outcome {
+    /** Posts the ops of [head], the queue's first entry, until they land or the queue changes under them. */
+    private fun post(head: Queued): Outcome {
         var conflicts = 0
-        var created = false
         while (true) {
+            if (queue.firstOrNull() !== head) return Outcome.Requeue
+            val ops = (head.entry as? OutboxEntry.Ops)?.ops ?: return Outcome.Requeue
             try {
                 val answer = client.call("POST", "/graphs/$graphName/ops", envelope(ops)) as? JsonObject
                 answer?.long("seq")?.let { seq = it }
@@ -438,13 +558,7 @@ class PleochroicGraphStore(
                         if (++conflicts > options.maxConflictRetries) return Outcome.Retry(null, "the graph kept changing under $conflicts posts")
                         sync()
                     }
-                    e.status == 404 && !created -> {
-                        val spec = mirror.embedding ?: return Outcome.Retry(null, "graph '$graphName' is gone and has no embedding to recreate it with")
-                        logger.warn("Graph '{}' is gone from Pleochroic; this device recreates it.", graphName)
-                        val outcome = create(spec)
-                        if (outcome != Outcome.Sent) return outcome
-                        created = true
-                    }
+                    e.status == 404 -> return Outcome.Gone
                     else -> return classify(e)
                 }
             }
@@ -491,6 +605,10 @@ class PleochroicGraphStore(
     /** Loads the whole graph again: its info, the snapshot and the ops after it, then this device's pending writes. */
     private fun reload() {
         val info = info()
+        if (info == null && opened && exists) {
+            markGone()
+            return
+        }
         devices.clear()
         if (info == null) {
             val create = queue.firstNotNullOfOrNull { it.entry as? OutboxEntry.Create }
@@ -546,6 +664,7 @@ class PleochroicGraphStore(
 
     /** Pulls other devices' writes into the mirror; when the log no longer reaches back far enough, reloads it all. */
     private fun sync() {
+        if (gone) return
         val touched = try {
             pullPages()
         } catch (e: SnapshotRequired) {
@@ -570,7 +689,10 @@ class PleochroicGraphStore(
                 client.call("GET", "/graphs/$graphName/ops?since=$seq&limit=${options.pageLimit}") as? JsonObject
             } catch (e: PleochroicApiException) {
                 if (e.status == 410 || e.code == "snapshot_required") throw SnapshotRequired()
-                if (e.status == 404) return touched
+                if (e.status == 404) {
+                    if (opened) markGone()
+                    return touched
+                }
                 throw e
             } ?: return touched
             val ops = (page["ops"] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
@@ -585,11 +707,58 @@ class PleochroicGraphStore(
         }
     }
 
-    /** Puts this device's pending writes back on top of the mirror, so they win over what they will overwrite. */
+    /**
+     * Puts this device's pending writes back on top of the mirror, so they win over what they will overwrite. A pending
+     * claim of a slot that another device's claim took first is dropped instead, and this device takes a new slot.
+     */
     private fun replayQueue() {
-        for (queued in queue) {
-            (queued.entry as? OutboxEntry.Ops)?.let { applyOps(mirror, devices, it.ops) }
+        var lost = false
+        var rewrite = false
+        val iterator = queue.iterator()
+        while (iterator.hasNext()) {
+            val queued = iterator.next()
+            val entry = queued.entry as? OutboxEntry.Ops ?: continue
+            val ops = entry.ops.filterNot(::lostClaim)
+            if (ops.size != entry.ops.size) {
+                lost = true
+                rewrite = rewrite || queued.persisted
+                if (ops.isEmpty()) {
+                    iterator.remove()
+                    continue
+                }
+                queued.entry = OutboxEntry.Ops(ops)
+            }
+            applyOps(mirror, devices, ops)
         }
+        if (lost) takeNewSlot(rewrite)
+    }
+
+    /** Whether [op] is this device's claim of a slot that another device holds. */
+    private fun lostClaim(op: JsonObject): Boolean {
+        val claim = (GraphWire.decode(op) as? WireOp.Device)?.record ?: return false
+        val holder = devices[claim.slot] ?: return false
+        return claim.deviceId == device.deviceId && holder.deviceId != device.deviceId
+    }
+
+    /**
+     * Claims a new slot ahead of every queued write but a pending create, so that it lands before any op that carries an
+     * id from it, and has the graph reloaded so that its next ids come from it.
+     */
+    private fun takeNewSlot(rewrite: Boolean) {
+        val old = device.slot
+        val claim = DeviceRecord(freeSlot(), device.deviceId, options.deviceName, Instant.now())
+        device = device.copy(slot = claim.slot)
+        files.writeDevice(device)
+        devices[claim.slot] = claim
+        val at = queue.indexOfFirst { it.entry !is OutboxEntry.Create }.let { if (it < 0) queue.size else it }
+        val persisted = rewrite || queue.any { it.persisted }
+        queue.add(at, Queued(OutboxEntry.Ops(listOf(GraphWire.putDevice(claim))), persisted))
+        if (persisted) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
+        logger.warn(
+            "Another device claimed slot {} of graph '{}' while this device's claim waited; this device takes slot {}.",
+            old, graphName, claim.slot,
+        )
+        note(RemoteChanges(emptySet(), reloaded = true))
     }
 
     /** Drops what remote writes left dangling and sends those deletes like any write. */
@@ -621,8 +790,24 @@ class PleochroicGraphStore(
     }
 
     private fun writeCache() {
+        if (gone) return
         val rows = mirror.rows().asSequence().map { GraphWire.encode(Change(it, removed = false)) }
         files.writeSnapshot(seq, mirror.embedding, rows + devices.values.asSequence().map(GraphWire::putDevice))
+    }
+
+    /**
+     * The graph was deleted on the service: its outbox (with the writes not saved yet) and copy go aside, and the store
+     * writes no more, so that the deleted graph's ops never come back as a fragment of a new one.
+     */
+    private fun markGone() {
+        if (gone) return
+        val aside = files.setAside(queue.filter { !it.persisted }.map { it.entry })
+        queue.clear()
+        gone = true
+        goneReason = "Graph '$graphName' was deleted on Pleochroic, so the memory kept there is wiped; this device " +
+            "stopped writing to it" + (aside?.let { " and moved its unsent writes to $it" } ?: "") +
+            ". Restart to start a new, empty graph under this name, or restore the graph on Pleochroic first."
+        logger.warn(goneReason)
     }
 
     // -- Device slot ----------------------------------------------------------
@@ -709,6 +894,9 @@ class PleochroicGraphStore(
         if (!found.isEmpty) onRemoteChange(found)
         return result
     }
+
+    private fun refusedKey(e: RuntimeException): Boolean =
+        (e is PleochroicApiException && (e.status == 401 || e.status == 403)).also { if (it) refused(e.message ?: "HTTP 401") }
 
     private fun transient(e: RuntimeException): Boolean =
         e is PleochroicUnreachableException || (e is PleochroicApiException && (e.status == 408 || e.status == 429 || e.status >= 500))

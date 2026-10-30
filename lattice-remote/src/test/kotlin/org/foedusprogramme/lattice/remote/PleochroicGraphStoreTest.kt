@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -74,6 +75,35 @@ class PleochroicGraphStoreTest {
         a.close()
         assertEquals(slotA, store("a").idSlot)
         assertEquals(2, server.graph(GRAPH)!!.records("device").size)
+    }
+
+    @Test
+    fun `a claim that waited while another device took its slot gives way, and the device takes a new slot first`() {
+        fun device(name: String, slot: Int) {
+            Files.createDirectories(dir.resolve(name))
+            Files.writeString(dir.resolve("$name/$GRAPH.device.json"), """{"deviceId":"dev-$name","slot":$slot}""")
+        }
+        device("c", 3)
+        store("c").declareEmbedding(SPEC)
+        device("a", 7)
+        device("b", 7)
+        server.failNextOps = 1
+        val a = store("a").also { it.load() }
+        assertEquals(1, a.pendingWrites, "a's claim waits in the outbox")
+        store("b").load()
+        heard.clear()
+
+        assertTrue(a.flush())
+
+        val claims = server.graph(GRAPH)!!.records("device").associate { it["slot"].toString().toInt() to it["deviceId"].toString().trim('"') }
+        assertEquals("dev-b", claims[7], "b's claim stands")
+        val slotA = claims.entries.single { it.value == "dev-a" }.key
+        assertNotEquals(7, slotA)
+        assertEquals(slotA, a.idSlot)
+        assertTrue(heard.any { it.reloaded }, "the graph is told to reload for its new slot: $heard")
+        assertTrue(Files.readString(dir.resolve("a/$GRAPH.device.json")).contains("\"slot\":$slotA"))
+        a.putEngram(engram(IdAllocator(a.idSlot).next()))
+        assertEquals(0, a.pendingWrites)
     }
 
     @Test
@@ -209,6 +239,24 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `an offline close saves the outbox and the copy without calling the service`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.failNextOps = 1
+        store.putEngram(engram(2))
+        Files.deleteIfExists(dir.resolve("a/$GRAPH.snapshot.ndjson"))
+        val before = server.requests.size
+
+        store.closeOffline()
+
+        assertEquals(before, server.requests.size)
+        assertTrue(Files.readString(dir.resolve("a/$GRAPH.outbox.jsonl")).contains("\"putEngram\""))
+        assertTrue(Files.exists(dir.resolve("a/$GRAPH.snapshot.ndjson")))
+        assertFailsWith<IllegalStateException> { store.putEngram(engram(3)) }
+        assertEquals(setOf(1L, 2L), store("a").load().engrams.map { it.id }.toSet())
+    }
+
+    @Test
     fun `a failed post is retried once the back-off has passed`() {
         val store = store(options = PleochroicGraphStore.Options(minRetryDelay = Duration.ZERO)).also { it.declareEmbedding(SPEC) }
         server.failNextOps = 1
@@ -217,6 +265,41 @@ class PleochroicGraphStoreTest {
         store.putEngram(engram(2))
         assertEquals(0, store.pendingWrites)
         assertEquals(setOf(1L, 2L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
+    fun `a full outbox keeps the oldest writes, says so, and takes writes again once it drained`() {
+        val store = store(options = PleochroicGraphStore.Options(minRetryDelay = Duration.ofMinutes(1), maxOutboxOps = 3))
+            .also { it.declareEmbedding(SPEC) }
+        server.down = true
+        (1L..5L).forEach { store.putEngram(engram(it)) }
+
+        assertEquals(3, store.pendingWrites)
+        assertContains(store.failure.orEmpty(), "as many writes waiting for Pleochroic as its outbox keeps")
+        assertEquals((1L..5L).toSet(), store.load().engrams.map { it.id }.toSet(), "the device still has them all")
+
+        server.down = false
+        assertTrue(store.flush())
+        assertNull(store.failure)
+        assertEquals(setOf(1L, 2L, 3L), server.graph(GRAPH)!!.engramIds)
+        store.putEngram(engram(6))
+        assertEquals(setOf(1L, 2L, 3L, 6L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
+    fun `a refused key keeps the writes in the outbox and is named as a setup error until a post lands`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        server.unauthorizedNextOps = 2
+        store.putEngram(engram(1))
+
+        assertEquals(1, store.pendingWrites)
+        assertContains(store.failure.orEmpty(), "Pleochroic refused the API key")
+        assertFalse(store.flush())
+        assertContains(store.failure.orEmpty(), "Pleochroic refused the API key")
+
+        assertTrue(store.flush())
+        assertNull(store.failure)
+        assertEquals(setOf(1L), server.graph(GRAPH)!!.engramIds)
     }
 
     @Test
@@ -244,6 +327,47 @@ class PleochroicGraphStoreTest {
         assertEquals(setOf(1L, 2L), b.load().engrams.map { it.id }.toSet())
         b.putEngram(engram(3))
         assertEquals(setOf(1L, 2L, 3L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
+    fun `a graph deleted on the service is not created again, and its unsent writes are moved aside`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.down = true
+        store.putEngram(engram(2))
+        server.down = false
+        server.delete(GRAPH)
+        store.putEngram(engram(3))
+
+        assertFalse(store.flush())
+
+        assertNull(server.graph(GRAPH), "the deleted graph is not created again")
+        assertContains(store.failure.orEmpty(), "was deleted on Pleochroic")
+        assertEquals(0, store.pendingWrites)
+        assertFalse(Files.exists(dir.resolve("a/$GRAPH.outbox.jsonl")))
+        val aside = Files.list(dir.resolve("a")).use { files -> files.toList() }
+            .single { it.fileName.toString().startsWith("$GRAPH.outbox.gone-") }
+        val kept = Files.readString(aside)
+        assertTrue("\"id\":2" in kept && "\"id\":3" in kept, kept)
+
+        val before = server.requests.size
+        store.putEngram(engram(4))
+        store.close()
+        assertEquals(before, server.requests.size, "a store whose graph is gone writes no more")
+        assertFalse(Files.exists(dir.resolve("a/$GRAPH.snapshot.ndjson")))
+    }
+
+    @Test
+    fun `a pull that finds the graph deleted stops the store too`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.delete(GRAPH)
+
+        store.pullRemoteChanges()
+
+        assertContains(store.failure.orEmpty(), "was deleted on Pleochroic")
+        store.putEngram(engram(2))
+        assertNull(server.graph(GRAPH))
     }
 
     @Test

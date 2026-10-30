@@ -116,6 +116,7 @@ internal class SleepTimer internal constructor(
 
     private suspend fun sleep(agent: AgentId) {
         try {
+            graphs.pull(agent)
             val report = graphs.graph(agent).sleep()
             last[agent] = Slept(time.now(), report)
             val failed = report.phases.filter { it.error != null }

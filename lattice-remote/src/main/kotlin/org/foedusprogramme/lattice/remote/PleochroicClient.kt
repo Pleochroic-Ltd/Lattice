@@ -17,7 +17,7 @@ class PleochroicClient(
     baseUrl: String = DEFAULT_BASE_URL,
     connectTimeout: Duration = Duration.ofSeconds(10),
     /** How long a call waits for its answer; a snapshot stream waits [streamTimeout] for its first byte. */
-    private val requestTimeout: Duration = Duration.ofSeconds(60),
+    val requestTimeout: Duration = Duration.ofSeconds(60),
     private val streamTimeout: Duration = Duration.ofMinutes(5),
     /** Sent as `X-Client` (e.g. `lattice/0.1 macbook`), recorded by the service in logs. */
     clientName: String? = null,

@@ -139,18 +139,43 @@ class SceneSourceTest {
         val forward = ForwardOrigin(ForwardKind.USER, "Bob", null, null)
         val vouched = Quote.builder("my earlier note").trust(QuoteTrust(live = true, content = true)).build()
         append(
-            said("plain"),
-            said("forwarded", forwarded = forward),
-            said("quoting", quote = Quote.builder("something Bob wrote").build()),
-            said("quoting myself", quote = vouched),
+            said("plain", OPERATOR),
+            said("forwarded", OPERATOR, forwarded = forward),
+            said("quoting", OPERATOR, quote = Quote.builder("something Bob wrote").build()),
+            said("quoting myself", OPERATOR, quote = vouched),
         )
         runBlocking { store.conversations.markTainted(current(), "a web page", clock.now.plusSeconds(30)) }
-        append(said("after the page"), answer("It said hello."))
+        append(said("after the page", OPERATOR), answer("It said hello."))
 
         assertEquals(
             listOf("plain" to false, "forwarded" to true, "quoting" to true, "quoting myself" to false, "after the page" to true, "It said hello." to true),
             messages().map { it.text to it.tainted },
         )
+    }
+
+    @Test
+    fun `whatever anyone but an operator says is tainted, a trusted user included`() {
+        append(
+            said("from the owner", OPERATOR),
+            said("from a trusted user", testUser("tess", isTrusted = true)),
+            said("from a guest"),
+        )
+
+        assertEquals(
+            listOf("from the owner" to false, "from a trusted user" to true, "from a guest" to true),
+            messages().map { it.text to it.tainted },
+        )
+    }
+
+    @Test
+    fun `the registry keeps the latest conversations, also across a restart`() {
+        val file = dir.resolve("capped.jsonl")
+        val capped = ConversationRegistry(file, maxEntries = 3)
+        (1..5).forEach { capped.add(RegisteredConversation("main", chatKey, "c$it")) }
+
+        assertEquals(listOf("c3", "c4", "c5"), capped.conversations(AgentId.MAIN, chatKey))
+        assertEquals(3, Files.readAllLines(file).size)
+        assertEquals(listOf("c3", "c4", "c5"), ConversationRegistry(file, maxEntries = 3).conversations(AgentId.MAIN, chatKey))
     }
 
     @Test

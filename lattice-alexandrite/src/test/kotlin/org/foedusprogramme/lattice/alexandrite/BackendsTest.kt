@@ -4,6 +4,7 @@ package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.serialization.json.Json
 import org.foedusprogramme.lattice.SceneTrustPolicy
+import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginFiles
 import org.unitedsoftware.alexandrite.testkit.MemoryStore
@@ -11,9 +12,11 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 /** What a graph's dependencies carry for scenes. */
 class BackendsTest {
@@ -43,6 +46,39 @@ class BackendsTest {
 
         assertIs<AlexandriteConversationSource>(dependencies.conversations)
         assertIs<AlexandriteSceneTrustPolicy>(dependencies.sceneTrust)
+    }
+
+    @Test
+    fun `a host that binds no store is told once at start, with what Lattice goes without`() {
+        fun warning(extra: String, transcripts: Boolean, conversations: Boolean): String? = SceneHost(
+            Json.decodeFromString(LatticeConfig.serializer(), config(extra)),
+            files,
+            store.transcripts.takeIf { transcripts },
+            store.conversations.takeIf { conversations },
+        ).storesWarning()
+
+        assertNull(warning("{}", transcripts = true, conversations = true))
+        assertEquals(
+            "The host binds no conversation store and transcript store to plugins, so every captured turn and summary " +
+                "counts as tainted and conversations are captured in batches of turns instead of scenes",
+            warning(SCENES_ON, transcripts = false, conversations = false),
+        )
+        assertEquals(
+            "The host binds no transcript store to plugins, so scenes cannot be turned on",
+            warning("{}", transcripts = false, conversations = true),
+        )
+    }
+
+    @Test
+    fun `the dead letters are kept in two files at most`() {
+        val path = dir.resolve("dead-letters").resolve("main.jsonl")
+        val letters = RotatingDeadLetter(path, maxBytes = 2_000)
+        repeat(30) { letters.record(DeadLetterEntry("unparseable $it", "capture", null, null, "t".repeat(200), "r")) }
+
+        val kept = Files.list(path.parent).use { it.toList() }.map { it.fileName.toString() }.toSet()
+        assertEquals(setOf("main.jsonl", "main.jsonl.1"), kept)
+        assertTrue(Files.size(path) < 3_000 && Files.size(path.resolveSibling("main.jsonl.1")) < 3_000)
+        assertTrue("unparseable 29" in Files.readString(path))
     }
 
     @Test

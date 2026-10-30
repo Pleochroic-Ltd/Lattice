@@ -31,6 +31,8 @@ internal class LatticeConfig(
     val assistantNames: List<String> = emptyList(),
     /** The zone of dates in memories and of the sleep time, the host's when null. */
     val zone: String? = null,
+    /** `operators`, `trusted` or `everyone`: the least a turn's sender must be for the memory to be used in it. */
+    val access: String = OPERATORS,
     val storage: StorageConfig = StorageConfig(),
     val embedder: EmbedderConfig? = null,
     val model: ModelConfig? = null,
@@ -48,6 +50,10 @@ internal class LatticeConfig(
         }
         require(assistantNames.none { it.isBlank() }) { "assistantNames may not hold a blank name: remove it." }
         zone?.let { zoneOf("zone", it) }
+        require(access == OPERATORS || access == TRUSTED || access == EVERYONE) {
+            "access must be \"$OPERATORS\", \"$TRUSTED\" or \"$EVERYONE\": the least a turn's sender must be for the " +
+                "memory to be recalled into, captured from or searched in the turn."
+        }
         storage.check()
         requireNotNull(embedder) {
             "embedder is not set: add one, such as {\"kind\": \"openai\", \"baseUrl\": \"http://127.0.0.1:8080/v1\", " +
@@ -123,21 +129,44 @@ internal class StorageConfig(
     val kind: String = LOCAL,
     /** What a Pleochroic graph's name starts with, before the agent id. */
     val graphPrefix: String? = null,
+    /** How often a Pleochroic graph pulls what other devices wrote, 300 when null. */
+    val pullSeconds: Int? = null,
 ) {
     fun check() {
         require(kind == LOCAL || kind == PLEOCHROIC) { "storage.kind must be \"local\" or \"pleochroic\"." }
         if (kind == LOCAL) {
-            require(graphPrefix == null) {
-                "storage.graphPrefix is only read when storage.kind is \"pleochroic\": remove it."
+            require(graphPrefix == null && pullSeconds == null) {
+                "storage.graphPrefix and storage.pullSeconds are only read when storage.kind is \"pleochroic\": " +
+                    "remove them."
             }
         }
+        require(pullSeconds == null || pullSeconds in MIN_PULL_SECONDS..MAX_PULL_SECONDS) {
+            "storage.pullSeconds must be between $MIN_PULL_SECONDS and $MAX_PULL_SECONDS."
+        }
         require(graphPrefix == null || GRAPH_PREFIX.matches(graphPrefix)) {
-            "storage.graphPrefix may hold only lowercase letters, digits and '-', such as \"home-\"."
+            "storage.graphPrefix must start with a lowercase letter or digit and hold only lowercase letters, digits " +
+                "and '-', such as \"home-\"."
+        }
+        require(graphPrefix == null || graphPrefix.length < MAX_GRAPH_NAME) {
+            "storage.graphPrefix is ${graphPrefix?.length} characters long, which leaves no room for the agent id in " +
+                "Pleochroic's $MAX_GRAPH_NAME: shorten it."
         }
     }
 
-    /** The name of [agent]'s graph where it is stored. */
-    fun graphName(agent: String): String = (graphPrefix ?: "") + agent
+    /** How often a Pleochroic graph pulls other devices' writes, null for a local one. */
+    val pullInterval: Duration?
+        get() = if (kind == PLEOCHROIC) (pullSeconds ?: DEFAULT_PULL_SECONDS).seconds else null
+
+    /** The name of [agent]'s graph where it is stored; throws when it is longer than Pleochroic takes. */
+    fun graphName(agent: String): String {
+        val name = (graphPrefix ?: "") + agent
+        require(name.length <= MAX_GRAPH_NAME) {
+            "The memory of agent '$agent' would be the Pleochroic graph '$name', ${name.length} characters long, over " +
+                "Pleochroic's $MAX_GRAPH_NAME: shorten storage.graphPrefix to at most ${MAX_GRAPH_NAME - agent.length} " +
+                "characters."
+        }
+        return name
+    }
 }
 
 @Serializable
@@ -185,8 +214,10 @@ internal class ModelConfig(
     val tasks: Map<String, String> = emptyMap(),
     val baseUrl: String? = null,
     val apiKey: Secret? = null,
-    val maxOutputTokens: Int = 8192,
-    val timeoutSeconds: Int = 180,
+    /** The most tokens a call may write: 8192 for a host model when null, the server's limit for an `openai` one. */
+    val maxOutputTokens: Int? = null,
+    /** How long a call may take: 180 s for a host model when null, 300 s for an `openai` one, 60 s for Pleochroic. */
+    val timeoutSeconds: Int? = null,
 ) {
     fun check() {
         when (kind) {
@@ -215,19 +246,39 @@ internal class ModelConfig(
                 }
             }
 
-            PLEOCHROIC, NONE -> require(default == null && tasks.isEmpty() && baseUrl == null && apiKey == null) {
-                "model.default, tasks, baseUrl and apiKey are not read when model.kind is \"$kind\": remove them."
+            PLEOCHROIC, NONE -> {
+                require(default == null && tasks.isEmpty() && baseUrl == null && apiKey == null) {
+                    "model.default, tasks, baseUrl and apiKey are not read when model.kind is \"$kind\": remove them."
+                }
+                require(maxOutputTokens == null) {
+                    "model.maxOutputTokens is not read when model.kind is \"$kind\": remove it" +
+                        if (kind == PLEOCHROIC) ", since Pleochroic sets each task's output budget." else "."
+                }
+                require(kind != NONE || timeoutSeconds == null) {
+                    "model.timeoutSeconds is not read when model.kind is \"none\": remove it."
+                }
             }
 
             else -> throw IllegalArgumentException(
                 "model.kind must be \"host\", \"openai\", \"pleochroic\" or \"none\".",
             )
         }
-        require(maxOutputTokens in 256..1_000_000) { "model.maxOutputTokens must be between 256 and 1000000." }
-        require(timeoutSeconds in 5..3600) { "model.timeoutSeconds must be between 5 and 3600." }
+        require(maxOutputTokens == null || maxOutputTokens in 256..1_000_000) {
+            "model.maxOutputTokens must be between 256 and 1000000."
+        }
+        require(timeoutSeconds == null || timeoutSeconds in 5..3600) { "model.timeoutSeconds must be between 5 and 3600." }
     }
 
-    val timeout: Duration get() = timeoutSeconds.seconds
+    /** The most tokens a host model's call may write. */
+    val hostMaxOutputTokens: Int get() = maxOutputTokens ?: DEFAULT_HOST_OUTPUT_TOKENS
+
+    /** How long a call may take. */
+    val timeout: Duration
+        get() = timeoutSeconds?.seconds ?: when (kind) {
+            HOST -> DEFAULT_HOST_TIMEOUT
+            OPENAI -> DEFAULT_OPENAI_TIMEOUT
+            else -> DEFAULT_PLEOCHROIC_TIMEOUT
+        }
 
     /** The model that [task] runs on. */
     fun modelOf(task: MemoryTask): String = tasks[task.wire] ?: default!!
@@ -302,10 +353,17 @@ internal class CaptureConfig(
     val onSeal: Boolean = true,
     /** Save the last compaction summary of a sealed conversation as an episode. */
     val episodes: Boolean = true,
+    /** How long the batches still pending may take to be captured while Alexandrite stops. */
+    val drainSeconds: Int = 4,
 ) {
     fun check() {
         require(turnsPerBatch in 1..MAX_BATCH) { "capture.turnsPerBatch must be between 1 and $MAX_BATCH." }
+        require(drainSeconds in 0..MAX_DRAIN_SECONDS) {
+            "capture.drainSeconds must be between 0 and $MAX_DRAIN_SECONDS, well under Alexandrite's shutdown grace."
+        }
     }
+
+    val drainTimeout: Duration get() = drainSeconds.seconds
 }
 
 @Serializable
@@ -331,7 +389,8 @@ internal class SleepConfig(
 @Serializable
 internal class GraphConfig(
     val readTimeoutSeconds: Int = 15,
-    val shutdownTimeoutSeconds: Int = 30,
+    /** How long closing a graph may take while Alexandrite stops; its stores are saved without the network after it. */
+    val shutdownTimeoutSeconds: Int = 8,
     val judgeBudget: Int = 1000,
     val judgeParallelism: Int = 4,
     val valueAwareFold: Boolean = true,
@@ -448,7 +507,17 @@ private const val MAX_BATCH = 100
 private const val MAX_SEGMENT = 1000
 private const val MAX_LOOKAHEAD = 200
 private const val MIN_WINDOW = 10
+private const val MAX_DRAIN_SECONDS = 60
+private const val DEFAULT_HOST_OUTPUT_TOKENS = 8192
+private val DEFAULT_HOST_TIMEOUT = 180.seconds
+private val DEFAULT_OPENAI_TIMEOUT = 300.seconds
+private val DEFAULT_PLEOCHROIC_TIMEOUT = 60.seconds
+private const val DEFAULT_PULL_SECONDS = 300
+private const val MIN_PULL_SECONDS = 10
+private const val MAX_PULL_SECONDS = 86_400
 
-private val GRAPH_PREFIX = Regex("[a-z0-9-]*")
+/** A prefix of a Pleochroic graph name, `^[a-z0-9][a-z0-9-]{0,62}$`; the agent id follows it. */
+private val GRAPH_PREFIX = Regex("([a-z0-9][a-z0-9-]*)?")
+private const val MAX_GRAPH_NAME = 63
 
 private val CLOCK_TIME = DateTimeFormatter.ofPattern("HH:mm")

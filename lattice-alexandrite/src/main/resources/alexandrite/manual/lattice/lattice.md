@@ -4,7 +4,15 @@ How Lattice gives each agent a long-term memory: what it recalls into a turn, wh
 
 ## What happens on its own
 
-Each agent has one memory graph, shared by all its chats. Before a message turn, Lattice recalls what the message brings
+Each agent has one memory graph, shared by all its chats, so what one chat said can come back in another. `access`
+decides who reaches it: by default only the agent's operators (whom their channel counts operators in the chat), or
+also trusted users (`trusted`: whom the channel trusts in the chat, or who are named in `scenes.trustedSenders`), or
+everyone (`everyone`). A turn whose sender is below that level gets no recall and no period catalogue, is not captured,
+and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. A turn
+with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`. Whatever anyone but an
+operator says or saves is kept tainted, so it never comes back as trusted content.
+
+Before a message turn, Lattice recalls what the message brings
 back and adds it to the turn as a memory block. A block that holds memories of turns that read untrusted content (a web
 page, a tool's output, an untrusted person's message) comes as untrusted content and taints the turn. When recall is
 slow or fails, the turn goes on without memories.
@@ -20,8 +28,8 @@ occasion), extracts the memories of each ended scene, and writes a short summary
 conversation sealed with `/new` is cut to its end. Heartbeats and sub-agent runs stay out of a chat's scenes. Whatever
 a turn or a seal leaves uncut is caught up in the nightly sleep.
 
-A scene is trusted only when everyone who wrote in it is an operator or a trusted user of the chat (or named in
-`scenes.trustedSenders`), every tool result in it comes from a read-only tool or one that changes only the agent's own
+A scene is trusted only when everyone who wrote in it is an operator of the chat (what anyone else says is tainted),
+every tool result in it comes from a read-only tool or one that changes only the agent's own
 state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quoted unverified or written after the
 conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
 Lattice learns each tool's risk when a turn offers it.
@@ -41,7 +49,7 @@ consolidates memories, merges duplicates, writes summaries of clusters and lets 
   remembering what it finds. Use it for questions about the past, lists and counts that the recalled block does not
   answer. Its result is untrusted when it holds memories of tainted turns.
 - lattice.save: saves one memory as written, with an importance from 0 to 1. Write one self-contained statement that
-  names who and when. A save from a tainted conversation is saved tainted.
+  names who and when. A save from a tainted conversation, or by anyone but an operator, is saved tainted.
 - lattice.timeline: shows the chat's eras and periods with their dates; given a period or an era (a name, part of one,
   an old name, or a date inside it), its summary and its scenes. A scene with untrusted content is listed by its date
   only. A period whose name lists withhold, found by a date, shows its name and summary as untrusted content. Needs
@@ -61,23 +69,38 @@ Lattice reads `plugins.lattice`:
 - `assistantNames`: the names the assistant goes by in conversation, so its own memories are written in the first person
   and never become entities.
 - `zone`: the zone of dates in memories and of the sleep time, the host's when unset.
+- `access`: `operators` (the default), `trusted` or `everyone`: the least a turn's sender must be for the memory to be
+  recalled into, captured from, searched, saved to or shown in the turn.
 - `storage.kind`: `local` keeps each agent's graph in a SQLite file in the plugin's data directory; `pleochroic` keeps
-  it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>`.
+  it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>` (lowercase letters, digits and `-`,
+  starting with a letter or digit, at most 63 characters in all). A Pleochroic graph can be shared by
+  several devices: each pulls what the others wrote every `storage.pullSeconds` (300 by default) and before each sleep,
+  and as soon as one of its own writes finds some, and then reloads its graph. A graph deleted on Pleochroic is not
+  made again: the device logs it once as an error, stops writing to it and keeps its unsent writes aside in its state
+  directory; after a restart it starts a new, empty graph. A key that Pleochroic refuses is logged once as an error;
+  writes wait on the device meanwhile, up to 200 000 operations or 128 MiB, past which later ones stay on the device
+  only until the backlog is sent, and are lost at a restart.
 - `embedder.kind`: `openai` for an OpenAI-compatible embeddings API (`baseUrl`, `model`, `apiKey`, `dimension`), or
   `pleochroic`. A graph keeps the embedding model it was made with.
 - `model.kind`: `host` for one of the host's model endpoints (`default` as `<endpoint>/<model>`, and `tasks` to give a
   task its own model), `openai` for an OpenAI-compatible chat API (`baseUrl`, `apiKey`, `default`, `tasks`), `pleochroic`,
   or `none` to keep memories without extracting any. The tasks are `extract`, `judge`, `abstract`, `entities`,
-  `narrate`, `scenes` and `periods`. `maxOutputTokens` and `timeoutSeconds` bound each call.
+  `narrate`, `scenes` and `periods`. `maxOutputTokens` bounds what a `host` call (8192 by default) or an `openai` call
+  (the server's own limit by default) writes; Pleochroic sets it per task itself. `timeoutSeconds` bounds how long a call
+  waits: 180 seconds by default for `host`, 300 for `openai` and 60 for `pleochroic`.
 - `pleochroic.baseUrl`, `pleochroic.apiKey`: the account that every `pleochroic` part uses.
 - `recall`: `enabled`, `limit` (memories per turn), `language` (of the block's markers and the period catalogue),
   `timeoutMillis` (also bounds reading the catalogue), `fallback` (`drop` or `bake`: whether an endpoint that cannot
   show the block for one turn alone leaves it out or keeps it in the turn's message), and `catalogue` (on by default:
   whether each turn's system prompt carries the chat's period catalogue; read only with scenes on).
-- `capture`: `enabled`, `turnsPerBatch`, `onCompaction`, `onSeal`, and `episodes`.
+- `capture`: `enabled`, `turnsPerBatch`, `onCompaction`, `onSeal`, `episodes`, and `drainSeconds` (4 by default: how
+  long the batches still pending may take to be captured while Alexandrite stops; the rest is not captured).
 - `sleep`: `enabled`, `at` (a local time `HH:mm`) and `zone`.
 - `graph`: the engine's switches, such as `entityExtraction`, `entityRecall`, `sameDayEpisodes`, `judgeBudget` and
-  `readTimeoutSeconds`.
+  `readTimeoutSeconds`, and `shutdownTimeoutSeconds` (8 by default: how long the graphs, closed together, may take to
+  finish their work while Alexandrite stops; their stores are then saved without the network). Alexandrite gives all
+  plugins 15 seconds by default to stop, so keep `capture.drainSeconds` and `graph.shutdownTimeoutSeconds` well under
+  that together.
 - `scenes`: `enabled` (off by default; needs a model and Alexandrite's stores, and replaces `capture`'s batches),
   `sceneEpisodes` (recall shows when each memory was said, and scene summaries beside facts), `narrationCheck`
   (`anchors` or `selfCheck`), `segmentBatchMessages` (said messages that gather before a live conversation is cut),
@@ -117,5 +140,10 @@ Scenes on, with recall that shows when things were said, added to a config like 
   }
 }
 ```
+
+Lattice reads the conversations back from Alexandrite's conversation and transcript stores, which the SDK reserves for
+the agent itself. A host that does not bind them to plugins is told once at start, in the log: without the conversation
+store every captured turn and summary counts as tainted, and without either store scenes do not run and conversations
+are captured in batches of turns.
 
 A config change needs a restart. Keys the plugin does not know stop the start with a message that names them.

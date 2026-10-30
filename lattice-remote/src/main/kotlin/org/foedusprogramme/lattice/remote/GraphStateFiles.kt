@@ -33,11 +33,11 @@ internal class CachedSnapshot(val seq: Long, val spec: EmbeddingSpec?, val ops: 
 /**
  * A remote graph's files in the state directory, named after the graph: `<name>.device.json` (the device id and
  * slot), `<name>.outbox.jsonl` (writes not yet on the server, one POST per line, oldest first),
- * `<name>.rejected.jsonl` (writes the server refused as malformed, kept for inspection) and `<name>.snapshot.ndjson`
- * (the graph as last seen, for opening without the network). Every rewrite goes through a temporary file and an
- * atomic move.
+ * `<name>.rejected.jsonl` (writes the server refused as malformed, kept for inspection; past [maxRejectedBytes] it
+ * becomes `<name>.rejected.jsonl.1`, replacing the one before) and `<name>.snapshot.ndjson` (the graph as last seen, for
+ * opening without the network). Every rewrite goes through a temporary file and an atomic move.
  */
-internal class GraphStateFiles(dir: Path, name: String) {
+internal class GraphStateFiles(dir: Path, private val name: String, private val maxRejectedBytes: Long = 8L * 1024 * 1024) {
     private val logger = LoggerFactory.getLogger(GraphStateFiles::class.java)
     private val device = dir.resolve("$name.device.json")
     private val outbox = dir.resolve("$name.outbox.jsonl")
@@ -90,6 +90,9 @@ internal class GraphStateFiles(dir: Path, name: String) {
     }
 
     fun appendRejected(entry: OutboxEntry, reason: String) {
+        if (Files.exists(rejected) && Files.size(rejected) >= maxRejectedBytes) {
+            Files.move(rejected, rejected.resolveSibling("${rejected.fileName}.1"), StandardCopyOption.REPLACE_EXISTING)
+        }
         Files.newBufferedWriter(rejected, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND).use { out ->
             out.write(
                 buildJsonObject {
@@ -100,6 +103,23 @@ internal class GraphStateFiles(dir: Path, name: String) {
             )
             out.write("\n")
         }
+    }
+
+    /**
+     * Moves the outbox, with [unsaved] appended, and the copy aside as `<name>.outbox.gone-<millis>.jsonl` and
+     * `<name>.snapshot.gone-<millis>.ndjson`, for a graph deleted on the service; returns where the outbox went, null when
+     * there was nothing to keep.
+     */
+    fun setAside(unsaved: List<OutboxEntry>): Path? {
+        appendOutbox(unsaved)
+        val stamp = System.currentTimeMillis()
+        if (Files.exists(snapshot)) {
+            Files.move(snapshot, snapshot.resolveSibling("$name.snapshot.gone-$stamp.ndjson"), StandardCopyOption.REPLACE_EXISTING)
+        }
+        if (!Files.exists(outbox)) return null
+        val aside = outbox.resolveSibling("$name.outbox.gone-$stamp.jsonl")
+        Files.move(outbox, aside, StandardCopyOption.REPLACE_EXISTING)
+        return aside
     }
 
     fun readSnapshot(): CachedSnapshot? {

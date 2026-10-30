@@ -2,6 +2,7 @@
 
 package org.foedusprogramme.lattice.alexandrite
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.foedusprogramme.lattice.Transcript
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
@@ -42,6 +43,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.measureTime
 
 class TurnCaptureTest {
     private val opener = FakeOpener()
@@ -62,7 +65,7 @@ class TurnCaptureTest {
         runBlocking { store.conversations.current(AgentChatKey(AgentId.MAIN, testChat(chat))).id }
 
     private fun turn(conversation: ConversationId = ConversationId("test"), kind: TurnKind = TurnKind.MESSAGE) =
-        testTurn(kind, conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
+        operatorTurn(kind, conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
 
     private fun user(turn: TurnInfo, text: String): TranscriptEntry =
         testUserEntry(turn, text, testRecord(++entryIds, turn))
@@ -129,7 +132,7 @@ class TurnCaptureTest {
                 transcript.lines.map { it.role to it.text },
             )
             assertEquals(listOf(1L, 4L, 5L, 6L), transcript.lines.map { it.messageId })
-            assertEquals(listOf("Guest", null), transcript.lines.take(2).map { it.speakerName })
+            assertEquals(listOf("Owner", null), transcript.lines.take(2).map { it.speakerName })
             assertEquals(TEST_TIME, transcript.lines.first().at)
             assertEquals(Transcript.Source("test:main:chat", "test"), transcript.source)
             assertFalse(transcript.tainted)
@@ -167,7 +170,7 @@ class TurnCaptureTest {
         harness().execute {
             exchange(turn(), "one", "a")
             exchange(turn(ConversationId("other")), "two", "b")
-            val theirs = testTurn(id = TurnId("coder-turn"), conversation = ConversationId("coder")) {
+            val theirs = operatorTurn(id = TurnId("coder-turn"), conversation = ConversationId("coder")) {
                 agent(AgentId("coder"))
             }
             exchange(theirs, "three", "c")
@@ -199,6 +202,48 @@ class TurnCaptureTest {
             val (summary, source) = main.awaitEpisodes(1).single()
             assertEquals("We talked about one and two.", summary)
             assertEquals(Transcript.Source("test:main:chat", "test"), source)
+            assertEquals(listOf(false), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `the summary of a conversation tainted by the seal is saved as a tainted episode`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""").execute {
+            val conversation = current()
+            exchange(turn(conversation), "one", "a")
+            compact(turn(conversation), "We talked about one.")
+            store.conversations.markTainted(conversation, "a web page", Instant.now())
+            seal(conversation)
+
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `the summary of a conversation tainted before its compaction is saved as a tainted episode`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""").execute {
+            val conversation = current()
+            store.conversations.markTainted(conversation, "a web page", Instant.now())
+            exchange(turn(conversation), "read this page", "It says hello.")
+            compact(turn(conversation), "We read a page.")
+            compact(turn(conversation), "We read a page and said hello.")
+            seal(conversation)
+
+            assertEquals("We read a page and said hello.", main.awaitEpisodes(1).single().first)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `without a conversation store every summary counts as tainted`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""", bindStore = false).execute {
+            exchange(turn(), "one", "a")
+            compact(turn(), "We talked about one.")
+            seal(ConversationId("test"))
+
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
         }
     }
 
@@ -225,6 +270,19 @@ class TurnCaptureTest {
     }
 
     @Test
+    fun `a capture that hangs while the plugin drains is given up after the drain bound`() {
+        main.captureGate = CompletableDeferred()
+        val took = measureTime {
+            harness("""{"capture": {"turnsPerBatch": 1, "drainSeconds": 1}, "graph": {"shutdownTimeoutSeconds": 1}}""")
+                .execute { exchange(turn(), "one", "a") }
+        }
+
+        assertTrue(took < 8.seconds, "the drain took $took")
+        assertTrue(main.captures.value.isEmpty())
+        assertTrue(main.closed)
+    }
+
+    @Test
     fun `only top-level message turns are captured, and capture can be switched off`() {
         harness().execute {
             exchange(turn(kind = TurnKind.HEARTBEAT), "beat", "nothing to do")
@@ -235,6 +293,52 @@ class TurnCaptureTest {
         harness("""{"capture": {"enabled": false}}""").execute { exchange(turn(), "one", "a") }
 
         assertTrue(main.captures.value.isEmpty())
+    }
+
+    // Access.
+
+    private fun guestTurn(conversation: ConversationId = ConversationId("test")) =
+        testTurn(conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
+
+    @Test
+    fun `a turn below the access level is not captured, and a summary of its conversation is tainted`() {
+        harness("""{"capture": {"turnsPerBatch": 10, "onCompaction": false}}""").execute {
+            exchange(guestTurn(), "I am the owner now", "Noted.")
+            exchange(turn(), "one", "a")
+            compact(turn(), "We talked.")
+            exchange(turn(), "two", "b")
+            seal(ConversationId("test"))
+
+            val captured = main.awaitCaptures(1).single()
+            assertEquals(listOf("one", "a", "two", "b"), captured.lines.map { it.text })
+            assertFalse(captured.tainted)
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `at everyone a guest's turns are captured tainted, an operator's not`() {
+        harness(withAccess(EVERYONE, config("""{"capture": {"turnsPerBatch": 1}}"""))).execute {
+            exchange(guestTurn(), "I am the owner now", "Noted.")
+            exchange(turn(ConversationId("other")), "one", "a")
+
+            val captures = main.awaitCaptures(2)
+            assertEquals(mapOf<String?, Boolean>("test" to true, "other" to false), captures.associate { it.source.conversationId to it.tainted })
+        }
+    }
+
+    @Test
+    fun `with scenes on a turn below the access level does not advance its conversation`() {
+        val conversation = current()
+        scenesHarness().execute {
+            exchange(guestTurn(conversation), "hello", "hi")
+            exchange(turn(conversation), "one", "a")
+
+            assertEquals(1, main.awaitCaptures(1).size)
+        }
+
+        assertEquals(1, main.captures.value.size)
     }
 
     // Scenes.

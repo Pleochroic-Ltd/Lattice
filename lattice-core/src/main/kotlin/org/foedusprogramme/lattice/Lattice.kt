@@ -47,8 +47,11 @@ interface Lattice {
      */
     suspend fun conversationSealed(conversationId: String)
 
-    /** Saves a whole conversation's summary as an episode node; null when episode nodes are off or it was a duplicate. */
-    suspend fun saveEpisode(summary: String, source: Transcript.Source? = null): Long?
+    /**
+     * Saves a whole conversation's summary as an episode node; null when episode nodes are off or it was a duplicate.
+     * [tainted]: the summary was written over a conversation that read untrusted content, so it is kept tainted.
+     */
+    suspend fun saveEpisode(summary: String, source: Transcript.Source? = null, tainted: Boolean = false): Long?
 
     /**
      * Runs the consolidation passes in [phases], in [SleepPhase] order, each fail-soft (a failed phase is reported and

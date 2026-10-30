@@ -188,6 +188,39 @@ class LatticeConfigTest {
     }
 
     @Test
+    fun `a model's output limit and timeout reach the backends that take them and are refused by the others`() {
+        val openai = """"kind": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "default": "m""""
+        val bounded = openAiModelConfig(decode(config("""{"model": {$openai, "maxOutputTokens": 2000, "timeoutSeconds": 30}}""")).modelConfig)
+        assertEquals(2000, bounded.maxTokens)
+        assertEquals(java.time.Duration.ofSeconds(30), bounded.requestTimeout)
+        val unbounded = openAiModelConfig(decode(config("""{"model": {$openai}}""")).modelConfig)
+        assertNull(unbounded.maxTokens)
+        assertEquals(java.time.Duration.ofSeconds(300), unbounded.requestTimeout)
+
+        val host = decode(config("""{"model": {"kind": "host", "default": "a/b"}}""")).modelConfig
+        assertEquals(8192, host.hostMaxOutputTokens)
+        assertEquals(180.seconds, host.timeout)
+
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        assertContains(
+            refused(config("""{"model": {"kind": "pleochroic", "maxOutputTokens": 2000}, $pleochroic}""")),
+            "model.maxOutputTokens is not read when model.kind is \"pleochroic\"",
+        )
+        assertContains(
+            refused(config("""{"model": {"kind": "none", "timeoutSeconds": 30}}""")),
+            "model.timeoutSeconds is not read when model.kind is \"none\"",
+        )
+        fun client(model: String) = Backends(
+            decode(config("""{"model": $model, $pleochroic}""")),
+            java.nio.file.Files.createTempDirectory("lattice-model"),
+            emptyList(),
+            java.time.Clock.systemUTC(),
+        ).pleochroicModelClient()
+        assertEquals(java.time.Duration.ofSeconds(90), client("""{"kind": "pleochroic", "timeoutSeconds": 90}""").requestTimeout)
+        assertEquals(java.time.Duration.ofSeconds(60), client("""{"kind": "pleochroic"}""").requestTimeout)
+    }
+
+    @Test
     fun `pleochroic is required exactly when something uses it`() {
         assertContains(
             refused(config("""{"storage": {"kind": "pleochroic"}}""")),
@@ -203,8 +236,34 @@ class LatticeConfigTest {
         )
         assertContains(
             refused(config("""{"storage": {"kind": "local", "graphPrefix": "x-"}}""")),
-            "storage.graphPrefix is only read when storage.kind is \"pleochroic\"",
+            "storage.graphPrefix and storage.pullSeconds are only read when storage.kind is \"pleochroic\"",
         )
+        assertContains(
+            refused(config("""{"storage": {"kind": "local", "pullSeconds": 60}}""")),
+            "storage.graphPrefix and storage.pullSeconds are only read",
+        )
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        assertContains(
+            refused(config("""{"storage": {"kind": "pleochroic", "pullSeconds": 5}, $pleochroic}""")),
+            "storage.pullSeconds must be between 10 and 86400",
+        )
+        assertEquals(300.seconds, decode(config("""{"storage": {"kind": "pleochroic"}, $pleochroic}""")).storage.pullInterval)
+        assertNull(decode(BASE_CONFIG).storage.pullInterval)
+    }
+
+    @Test
+    fun `a graph prefix starts with a letter or digit and leaves room for the agent id`() {
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        fun prefix(value: String) = config("""{"storage": {"kind": "pleochroic", "graphPrefix": "$value"}, $pleochroic}""")
+
+        assertContains(refused(prefix("-home")), "storage.graphPrefix must start with a lowercase letter or digit")
+        assertContains(refused(prefix("Home-")), "storage.graphPrefix must start with a lowercase letter or digit")
+        assertContains(refused(prefix("a".repeat(63))), "leaves no room for the agent id")
+        val storage = decode(prefix("a".repeat(60))).storage
+        assertEquals("a".repeat(60) + "abc", storage.graphName("abc"))
+        val e = assertFailsWith<IllegalArgumentException> { storage.graphName("main") }
+        assertContains(e.message.orEmpty(), "shorten storage.graphPrefix to at most 59 characters")
+        assertEquals("main", decode(prefix("")).storage.graphName("main"))
     }
 
     @Test

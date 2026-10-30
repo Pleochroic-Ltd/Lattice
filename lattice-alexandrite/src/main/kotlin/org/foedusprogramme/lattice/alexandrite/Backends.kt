@@ -3,9 +3,11 @@ package org.foedusprogramme.lattice.alexandrite
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.SceneTrustPolicy
 import org.foedusprogramme.lattice.core.BundledTexts
+import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.foedusprogramme.lattice.core.Embedder
 import org.foedusprogramme.lattice.core.FileMemoryDeadLetter
 import org.foedusprogramme.lattice.core.LatticeStore
+import org.foedusprogramme.lattice.core.MemoryDeadLetter
 import org.foedusprogramme.lattice.core.MemoryModel
 import org.foedusprogramme.lattice.core.MemoryTask
 import org.foedusprogramme.lattice.core.MemoryTexts
@@ -16,23 +18,31 @@ import org.foedusprogramme.lattice.remote.PleochroicEmbedder
 import org.foedusprogramme.lattice.remote.PleochroicGraphStore
 import org.foedusprogramme.lattice.remote.PleochroicMemoryModel
 import org.foedusprogramme.lattice.sqlite.SqliteLatticeStore
+import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.config.ConfigException
 import org.unitedsoftware.alexandrite.sdk.config.Secret
 import org.unitedsoftware.alexandrite.sdk.model.ModelEndpoint
 import org.unitedsoftware.alexandrite.sdk.model.ModelProvider
 import org.unitedsoftware.alexandrite.sdk.transcript.EndpointId
 import org.unitedsoftware.alexandrite.sdk.transcript.ModelRef
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.time.Clock
+import java.time.Duration
 import kotlin.io.path.isDirectory
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
+import kotlin.time.toJavaDuration
 
 /** What each agent's graph runs on. */
 internal interface BackendFactory : AutoCloseable {
-    /** The store, embedder and model of the graph [graph], whose store the caller closes. */
-    fun dependencies(graph: String): LatticeDependencies
+    /**
+     * The store, embedder and model of the graph [graph], whose store the caller closes. A store that other devices
+     * write tells [sync] of their writes and lets it pull them.
+     */
+    fun dependencies(graph: String, sync: GraphSync? = null): LatticeDependencies
 
     /** The names of the graphs stored so far. */
     fun storedGraphs(): List<String>
@@ -59,7 +69,7 @@ internal class Backends(
         AlexandriteMemoryModel(
             { endpoints[it] },
             { task -> ModelRef.parse(model.modelOf(task)) },
-            model.maxOutputTokens,
+            model.hostMaxOutputTokens,
             model.timeout,
         )
     }
@@ -68,8 +78,8 @@ internal class Backends(
 
     private val model: MemoryModel? by lazy { model(config.modelConfig) }
 
-    override fun dependencies(graph: String): LatticeDependencies {
-        val store = store(graph)
+    override fun dependencies(graph: String, sync: GraphSync?): LatticeDependencies {
+        val store = store(graph, sync)
         try {
             val scene = scenes?.forGraph(graph)
             return LatticeDependencies(
@@ -78,7 +88,7 @@ internal class Backends(
                 model = model,
                 judgeModelId = judgeModelId(),
                 texts = texts(),
-                deadLetter = FileMemoryDeadLetter(dataDir.resolve("dead-letters").resolve("$graph.jsonl")),
+                deadLetter = RotatingDeadLetter(dataDir.resolve("dead-letters").resolve("$graph.jsonl")),
                 clock = clock,
                 conversations = scene?.source,
                 sceneTrust = scene?.trust ?: SceneTrustPolicy.Conservative,
@@ -120,7 +130,7 @@ internal class Backends(
         hostModel?.shutDown()
     }
 
-    private fun store(graph: String): LatticeStore = when (config.storage.kind) {
+    private fun store(graph: String, sync: GraphSync?): LatticeStore = when (config.storage.kind) {
         LOCAL -> {
             Files.createDirectories(dataDir.resolve(GRAPHS))
             sqliteStore(dataDir.resolve(GRAPHS).resolve("$graph.db"))
@@ -128,7 +138,7 @@ internal class Backends(
 
         else -> {
             val state = Files.createDirectories(dataDir.resolve(PLEOCHROIC_STATE).resolve(graph))
-            pleochroicStore(config.storage.graphName(graph), state)
+            pleochroicStore(config.storage.graphName(graph), state, sync)
         }
     }
 
@@ -139,8 +149,8 @@ internal class Backends(
 
     private fun model(model: ModelConfig): MemoryModel? = when (model.kind) {
         HOST -> hostModel
-        OPENAI -> openAiModel(model.baseUrl!!, model.apiKey, model.default!!, MemoryTask.entries.associateWith(model::modelOf))
-        PLEOCHROIC -> pleochroicModel()
+        OPENAI -> openAiModel(openAiModelConfig(model))
+        PLEOCHROIC -> pleochroicModel(pleochroicModelClient())
         else -> null
     }
 
@@ -152,32 +162,74 @@ internal class Backends(
         }
     }
 
-    private val pleochroicClient: PleochroicClient by lazy {
+    private val pleochroicClient: PleochroicClient by lazy { pleochroicClient(null) }
+
+    private fun pleochroicClient(requestTimeout: Duration?): PleochroicClient {
         val account = config.pleochroic!!
-        PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, clientName = "lattice-alexandrite")
+        return if (requestTimeout == null) {
+            PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, clientName = CLIENT_NAME)
+        } else {
+            PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, requestTimeout = requestTimeout, clientName = CLIENT_NAME)
+        }
     }
+
+    /** The client of Pleochroic's model calls: the shared one, or one that waits `model.timeoutSeconds` for an answer. */
+    internal fun pleochroicModelClient(): PleochroicClient =
+        config.modelConfig.timeoutSeconds?.let { pleochroicClient(Duration.ofSeconds(it.toLong())) } ?: pleochroicClient
 
     private fun sqliteStore(path: Path): LatticeStore = SqliteLatticeStore(path)
 
-    private fun pleochroicStore(graphName: String, stateDir: Path): LatticeStore =
-        PleochroicGraphStore(pleochroicClient, graphName, stateDir)
+    private fun pleochroicStore(graphName: String, stateDir: Path, sync: GraphSync?): LatticeStore =
+        PleochroicGraphStore(pleochroicClient, graphName, stateDir, onRemoteChange = { sync?.changed() })
+            .also { store -> sync?.attach({ store.failure }) { !store.pullRemoteChanges().isEmpty } }
 
     private fun openAiEmbedder(baseUrl: String, model: String, apiKey: Secret?, dimension: Int): Embedder =
         OpenAiEmbedder(OpenAiEmbedder.Config(baseUrl, model, apiKey?.reveal(), expectedDimension = dimension))
 
     private fun pleochroicEmbedder(): Embedder = PleochroicEmbedder(pleochroicClient)
 
-    private fun openAiModel(baseUrl: String, apiKey: Secret?, default: String, models: Map<MemoryTask, String>): MemoryModel =
-        OpenAiChatMemoryModel(
-            OpenAiChatMemoryModel.Config(baseUrl, default, models, apiKey?.reveal()),
-        )
+    private fun openAiModel(config: OpenAiChatMemoryModel.Config): MemoryModel = OpenAiChatMemoryModel(config)
 
-    private fun pleochroicModel(): MemoryModel = PleochroicMemoryModel(pleochroicClient)
+    private fun pleochroicModel(client: PleochroicClient): MemoryModel = PleochroicMemoryModel(client)
 
     private fun texts(): MemoryTexts = BundledTexts
 
     private companion object {
+        const val CLIENT_NAME = "lattice-alexandrite"
         const val GRAPHS = "graphs"
         const val PLEOCHROIC_STATE = "pleochroic"
     }
 }
+
+/** An `openai` model's settings: its models per task, its output limit and how long a call may take. */
+internal fun openAiModelConfig(model: ModelConfig): OpenAiChatMemoryModel.Config = OpenAiChatMemoryModel.Config(
+    baseUrl = model.baseUrl!!,
+    defaultModel = model.default!!,
+    models = MemoryTask.entries.associateWith(model::modelOf),
+    apiKey = model.apiKey?.reveal(),
+    maxTokens = model.maxOutputTokens,
+    requestTimeout = model.timeout.toJavaDuration(),
+)
+
+/**
+ * The model answers that did not parse, in [path] by [FileMemoryDeadLetter]; once it holds [maxBytes] it becomes
+ * `<path>.1`, replacing the one before, so two files at most are kept.
+ */
+internal class RotatingDeadLetter(private val path: Path, private val maxBytes: Long = MAX_DEAD_LETTER_BYTES) : MemoryDeadLetter {
+    private val file = FileMemoryDeadLetter(path)
+
+    override fun record(entry: DeadLetterEntry) = synchronized(this) {
+        try {
+            if (Files.exists(path) && Files.size(path) >= maxBytes) {
+                Files.move(path, path.resolveSibling("${path.fileName}.1"), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: IOException) {
+            logger.warn("Cannot set the dead letters of {} aside, so they grow on", path, e)
+        }
+        file.record(entry)
+    }
+}
+
+private const val MAX_DEAD_LETTER_BYTES = 8L * 1024 * 1024
+
+private val logger = LoggerFactory.getLogger(Backends::class.java)

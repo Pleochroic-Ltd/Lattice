@@ -25,7 +25,7 @@ import org.unitedsoftware.alexandrite.sdk.tool.ToolRisk
 
 @Singleton
 @Contribute(Tool::class)
-internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGraphs) : Tool {
+internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGraphs, private val access: MemoryAccess) : Tool {
     private val language = Language(config.recall.language)
     private val defaultLimit = config.recall.limit
 
@@ -57,6 +57,7 @@ internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGrap
     )
 
     override suspend fun execute(arguments: JsonObject, context: ToolContext): ToolResult {
+        if (!access.admits(context.turn)) return access.refusal("searched")
         val query = arguments.string("query")
             ?: return ToolResult("Give what to recall as a non-empty string 'query'.", isError = true)
         val limit = when (val given = arguments["limit"]) {
@@ -87,7 +88,7 @@ internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGrap
 
 @Singleton
 @Contribute(Tool::class)
-internal class SaveTool(private val graphs: LatticeGraphs) : Tool {
+internal class SaveTool(private val graphs: LatticeGraphs, private val access: MemoryAccess) : Tool {
     override val definition: ToolDefinition = ToolDefinition(
         name = "lattice.save",
         description = "Saves one memory to your long-term memory as you write it, such as a fact, a preference or a " +
@@ -115,6 +116,7 @@ internal class SaveTool(private val graphs: LatticeGraphs) : Tool {
     )
 
     override suspend fun execute(arguments: JsonObject, context: ToolContext): ToolResult {
+        if (!access.admits(context.turn)) return access.refusal("saved")
         val content = arguments.string("content")
             ?: return ToolResult("Give the memory as a non-empty string 'content'.", isError = true)
         val importance = when (val given = arguments["importance"]) {
@@ -122,7 +124,7 @@ internal class SaveTool(private val graphs: LatticeGraphs) : Tool {
             else -> (given as? JsonPrimitive)?.doubleOrNull?.takeIf { it in 0.0..1.0 }
                 ?: return ToolResult("Give 'importance' as a number from 0 to 1, or leave it out.", isError = true)
         }
-        val options = RememberOptions(salience = importance, tainted = context.tainted)
+        val options = RememberOptions(salience = importance, tainted = context.tainted || taintsMemory(context.turn.actor))
         val id = try {
             graphs.graph(context.turn.agent).remember(content, options)
         } catch (e: GraphBusyException) {

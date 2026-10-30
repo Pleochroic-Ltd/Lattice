@@ -14,7 +14,6 @@ import java.time.Duration
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeParseException
-import java.util.stream.Stream
 
 internal val JSON = Json {
     ignoreUnknownKeys = true
@@ -43,6 +42,10 @@ internal class HttpJson(
     private val requestTimeout: Duration,
     client: HttpClient?,
     private val headers: Map<String, String> = emptyMap(),
+    /** The most bytes of an answer read; a longer one fails as an [IOException]. */
+    private val maxBodyBytes: Int = MAX_BODY_BYTES,
+    /** The most bytes of a streamed answer's error body read; the rest is left out. */
+    private val maxErrorBytes: Int = MAX_ERROR_BYTES,
 ) {
     val baseUrl: String = baseUrl.trimEnd('/')
 
@@ -52,19 +55,23 @@ internal class HttpJson(
         .build()
 
     fun send(method: String, path: String, body: JsonElement? = null, timeout: Duration = requestTimeout): HttpAnswer {
-        val response = client.send(request(method, path, body, "application/json", timeout), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8))
-        return HttpAnswer(response.statusCode(), response.body(), retryAfter(response))
+        val response = client.send(request(method, path, body, "application/json", timeout), HttpResponse.BodyHandlers.ofInputStream())
+        val bytes = response.body().use { it.readNBytes(maxBodyBytes + 1) }
+        if (bytes.size > maxBodyBytes) {
+            throw IOException("The answer to $method $path is longer than the $maxBodyBytes bytes this client reads.")
+        }
+        return HttpAnswer(response.statusCode(), String(bytes, StandardCharsets.UTF_8), retryAfter(response))
     }
 
-    /** Streams the answer's lines; a non-2xx answer is read whole and returned as [HttpAnswer] instead. */
+    /** Streams the answer's lines; a non-2xx answer is read (its first [maxErrorBytes]) and returned as [HttpAnswer] instead. */
     fun <T> lines(path: String, timeout: Duration, block: (Sequence<String>) -> T): Pair<T?, HttpAnswer?> {
-        val response = client.send(request("GET", path, null, "application/x-ndjson", timeout), HttpResponse.BodyHandlers.ofLines())
-        val stream: Stream<String> = response.body()
-        return stream.use {
+        val response = client.send(request("GET", path, null, "application/x-ndjson", timeout), HttpResponse.BodyHandlers.ofInputStream())
+        return response.body().use { input ->
             if (response.statusCode() !in 200..299) {
-                null to HttpAnswer(response.statusCode(), it.iterator().asSequence().joinToString("\n"), retryAfter(response))
+                val text = String(input.readNBytes(maxErrorBytes), StandardCharsets.UTF_8)
+                null to HttpAnswer(response.statusCode(), text, retryAfter(response))
             } else {
-                block(it.iterator().asSequence()) to null
+                block(input.bufferedReader(StandardCharsets.UTF_8).lineSequence()) to null
             }
         }
     }
@@ -95,6 +102,9 @@ internal class HttpJson(
         }
     }
 }
+
+private const val MAX_BODY_BYTES = 64 * 1024 * 1024
+private const val MAX_ERROR_BYTES = 64 * 1024
 
 /** `{error: {code, message}}`, the error object of an answer, or null when the body isn't one. */
 internal fun HttpAnswer.errorObject(): JsonObject? = ((json() as? JsonObject)?.get("error") as? JsonObject)

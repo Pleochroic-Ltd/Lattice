@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.foedusprogramme.lattice.Transcript
 import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.chat.AgentId
@@ -27,10 +28,13 @@ import org.unitedsoftware.alexandrite.sdk.turn.ContextCompacted
 import org.unitedsoftware.alexandrite.sdk.turn.ConversationSealed
 import org.unitedsoftware.alexandrite.sdk.turn.TurnCommitted
 import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Batches the words of committed message turns per conversation and captures each batch into its agent's graph, every
- * few turns and at each compaction and seal, on one worker that takes the events in the order they happened.
+ * few turns and at each compaction and seal, on one worker that takes the events in the order they happened. A turn
+ * whose actor [MemoryAccess] turns away is left out; what anyone but an operator said is captured tainted.
  *
  * With scenes on, nothing is batched: each committed message turn tells its graph that the conversation has new
  * messages, which the graph reads back from the host's stores, and each seal tells it the conversation is finished.
@@ -42,6 +46,7 @@ internal class TurnCapture(
     private val taints: TurnTaints,
     private val scenes: SceneHost,
     private val scope: PluginScope,
+    private val access: MemoryAccess,
 ) : Lifecycle {
     private val config = config.capture
     private val events = Channel<Event>(CAPACITY)
@@ -53,8 +58,11 @@ internal class TurnCapture(
     /** Confined to the worker. */
     private val pending = LinkedHashMap<ConversationId, Batch>()
 
+    /** The conversations where anyone but an operator had a turn, whose summaries are kept tainted. */
+    private val foreign = ConcurrentHashMap.newKeySet<ConversationId>()
+
     /** The last compaction summary of each conversation, confined to the worker. */
-    private val summaries = HashMap<ConversationId, String>()
+    private val summaries = HashMap<ConversationId, Summary>()
 
     override suspend fun onOpen() {
         worker = scope.launch(CoroutineName("lattice-capture")) {
@@ -63,28 +71,43 @@ internal class TurnCapture(
         }
     }
 
+    /** Captures what is pending within [CaptureConfig.drainTimeout], then gives the rest up. */
     override suspend fun onDrain() {
         events.close()
-        worker?.join()
+        val worker = worker ?: return
+        if (withTimeoutOrNull(config.drainTimeout) { worker.join() } != null) return
+        worker.cancel()
+        withTimeoutOrNull(CANCEL_GRACE) { worker.join() }
+        logger.warn(
+            "Capturing stopped {} after Alexandrite began to stop, so the last turns of {} conversation(s) go uncaptured",
+            config.drainTimeout,
+            pending.size,
+        )
     }
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
         if (!config.enabled || !turn.remembers()) return
+        if (taintsMemory(turn.actor)) foreign += turn.conversation
+        if (!access.admits(turn)) return
         if (scenes.live) {
             offer(Event.Advanced(turn))
             return
         }
         val lines = lines(entries)
         if (lines.isEmpty()) return
-        offer(Event.Committed(turn, lines, taints.tainted(turn)))
+        offer(Event.Committed(turn, lines, taints.tainted(turn) || taintsMemory(turn.actor)))
     }
 
-    fun compacted(turn: TurnInfo, summary: String) {
-        if (config.enabled && turn.lineage == null) offer(Event.Compacted(turn, summary))
+    /** A summary is written by the model over the whole conversation, so it is as tainted as the conversation. */
+    suspend fun compacted(turn: TurnInfo, summary: String) {
+        if (!config.enabled || turn.lineage != null) return
+        val conversation = turn.conversation
+        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || conversation in foreign
+        offer(Event.Compacted(turn, summary, tainted))
     }
 
-    fun sealed(turn: TurnInfo, sealed: ConversationId) {
-        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed))
+    suspend fun sealed(turn: TurnInfo, sealed: ConversationId) {
+        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || sealed in foreign))
     }
 
     private fun offer(event: Event) {
@@ -112,14 +135,19 @@ internal class TurnCapture(
             is Event.Advanced -> advance(event.turn)
 
             is Event.Compacted -> {
-                summaries[conversation] = event.summary
+                // A later summary is written over the earlier one, so it keeps the earlier one's taint.
+                val tainted = event.tainted || summaries[conversation]?.tainted == true
+                summaries[conversation] = Summary(event.summary, tainted)
                 if (config.onCompaction) flush(conversation)
             }
 
             is Event.Sealed -> {
+                foreign -= event.sealed
                 if (scenes.live) seal(event.turn, event.sealed) else if (config.onSeal) flush(event.sealed)
                 val summary = summaries.remove(event.sealed)
-                if (summary != null && config.episodes) saveEpisode(event.turn, event.sealed, summary)
+                if (summary != null && config.episodes) {
+                    saveEpisode(event.turn, event.sealed, summary.text, summary.tainted || event.tainted)
+                }
             }
         }
     }
@@ -160,6 +188,8 @@ internal class TurnCapture(
     /** Tells the graph of the sealed [conversation] that it takes no more messages. */
     private suspend fun seal(turn: TurnInfo, conversation: ConversationId) {
         try {
+            // A conversation that no admitted turn brought in stays out, also when it is sealed.
+            if (scenes.registry.find(conversation.value) == null && !access.admits(turn)) return
             val registered = scenes.register(conversation) ?: return
             graphs.graph(AgentId(registered.agent)).conversationSealed(conversation.value)
         } catch (e: CancellationException) {
@@ -169,9 +199,9 @@ internal class TurnCapture(
         }
     }
 
-    private suspend fun saveEpisode(turn: TurnInfo, conversation: ConversationId, summary: String) {
+    private suspend fun saveEpisode(turn: TurnInfo, conversation: ConversationId, summary: String, tainted: Boolean) {
         try {
-            graphs.graph(turn.agent).saveEpisode(summary, source(turn, conversation))
+            graphs.graph(turn.agent).saveEpisode(summary, source(turn, conversation), tainted)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -181,6 +211,8 @@ internal class TurnCapture(
 
     private fun source(turn: TurnInfo, conversation: ConversationId): Transcript.Source =
         Transcript.Source(chatKey = turn.chatKey, conversationId = conversation.value)
+
+    private class Summary(val text: String, val tainted: Boolean)
 
     private class Batch(val agent: AgentId, val source: Transcript.Source) {
         val lines = mutableListOf<Transcript.Line>()
@@ -195,36 +227,32 @@ internal class TurnCapture(
 
         class Advanced(override val turn: TurnInfo) : Event
 
-        class Compacted(override val turn: TurnInfo, val summary: String) : Event
+        class Compacted(override val turn: TurnInfo, val summary: String, val tainted: Boolean) : Event
 
-        class Sealed(override val turn: TurnInfo, val sealed: ConversationId) : Event
+        class Sealed(override val turn: TurnInfo, val sealed: ConversationId, val tainted: Boolean) : Event
     }
 
     private companion object {
         const val CAPACITY = 1024
+        val CANCEL_GRACE = 1.seconds
     }
 }
 
 /** Whether a turn's conversation took in untrusted content, as the conversation store marks it. */
 @Singleton
 internal class TurnTaints(private val conversations: ConversationStore?) {
-    @Volatile
-    private var warned = false
+    /** True also when the store cannot tell, or the host binds none ([SceneHost.storesWarning] says so at start). */
+    suspend fun tainted(turn: TurnInfo): Boolean = tainted(turn.conversation)
 
-    /** True also when the store cannot tell. */
-    suspend fun tainted(turn: TurnInfo): Boolean {
-        val store = conversations
-        if (store == null) {
-            if (!warned) logger.warn("No conversation store is bound, so every captured turn counts as tainted")
-            warned = true
-            return true
-        }
+    /** Whether [conversation] took in untrusted content, true also when the store cannot tell. */
+    suspend fun tainted(conversation: ConversationId): Boolean {
+        val store = conversations ?: return true
         return try {
-            store.taint(turn.conversation) != null
+            store.taint(conversation) != null
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            logger.warn("Cannot read the taint of conversation {}, so its turn counts as tainted", turn.conversation, e)
+            logger.warn("Cannot read the taint of conversation {}, so its turn counts as tainted", conversation, e)
             true
         }
     }

@@ -24,7 +24,7 @@ class MemoryToolsTest {
     private suspend fun PluginHarness.Running.call(
         tool: String,
         vararg arguments: Pair<String, Any>,
-        context: ToolContext = testToolContext(),
+        context: ToolContext = testToolContext(operatorTurn()),
     ): ToolResult {
         val json = JsonObject(
             arguments.associate { (name, value) ->
@@ -57,7 +57,7 @@ class MemoryToolsTest {
     @Test
     fun `a search is an explicit recall that reinforces what it finds`() {
         main.recalls = { _, _ -> Recall("<memories>tea</memories>", listOf(hit(1, "tea")), tainted = false) }
-        val context = testToolContext()
+        val context = testToolContext(operatorTurn())
 
         latticeHarness(opener = opener).execute {
             val result = call("lattice.search", "query" to "drinks", "limit" to 3, context = context)
@@ -74,7 +74,7 @@ class MemoryToolsTest {
     @Test
     fun `a search that recalls tainted memories reports untrusted content`() {
         main.recalls = { _, _ -> Recall("<memories>x</memories>", listOf(hit(1, "x")), tainted = true) }
-        val context = testToolContext()
+        val context = testToolContext(operatorTurn())
 
         latticeHarness(opener = opener).execute { call("lattice.search", "query" to "x", context = context) }
 
@@ -95,8 +95,8 @@ class MemoryToolsTest {
 
     @Test
     fun `a save remembers the content, tainted when the turn is`() {
-        val clean = testToolContext()
-        val tainted = testToolContext().apply { this.tainted = true }
+        val clean = testToolContext(operatorTurn())
+        val tainted = testToolContext(operatorTurn()).apply { this.tainted = true }
 
         latticeHarness(opener = opener).execute {
             val first = call("lattice.save", "content" to " Alice moved to Berlin. ", context = clean)
