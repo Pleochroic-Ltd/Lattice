@@ -79,6 +79,9 @@ internal class FakeLattice(override val name: String) : Lattice {
     val remembered = CopyOnWriteArrayList<Pair<String, RememberOptions>>()
     val captures = MutableStateFlow<List<Transcript>>(emptyList())
     val episodes = MutableStateFlow<List<Pair<String, Transcript.Source?>>>(emptyList())
+
+    /** Whether each saved episode was tainted, in the order of [episodes]. */
+    val episodeTaints = CopyOnWriteArrayList<Boolean>()
     val sleeps = MutableStateFlow(0)
     val sealed = MutableStateFlow<List<String>>(emptyList())
 
@@ -104,7 +107,8 @@ internal class FakeLattice(override val name: String) : Lattice {
         sealed.update { it + conversationId }
     }
 
-    override suspend fun saveEpisode(summary: String, source: Transcript.Source?): Long? {
+    override suspend fun saveEpisode(summary: String, source: Transcript.Source?, tainted: Boolean): Long? {
+        episodeTaints += tainted
         episodes.update { it + (summary to source) }
         return 1
     }

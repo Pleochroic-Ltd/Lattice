@@ -522,11 +522,14 @@ internal class DefaultLattice(
      * A durable, theme-recallable summary of one whole conversation, kept off the structural graph and ranked below
      * specific facts. [source] names the conversation for the scene pipeline; the episode itself carries no anchor.
      */
-    override suspend fun saveEpisode(summary: String, source: Transcript.Source?): Long? = call {
+    override suspend fun saveEpisode(summary: String, source: Transcript.Source?, tainted: Boolean): Long? = call {
         if (!settings.episodicSessionNodes || summary.isBlank()) return@call null
         onGraphBounded { g ->
             val before = g.size
-            val id = g.remember(summary, EPISODE_SALIENCE, Engram.Layer.SEMANTIC, isEpisode = true, origin = Engram.Origin.EXTRACTED)
+            val id = g.remember(
+                summary, EPISODE_SALIENCE, Engram.Layer.SEMANTIC,
+                isEpisode = true, origin = Engram.Origin.EXTRACTED, tainted = tainted,
+            )
             if (g.size > before) id else null
         }
     }

@@ -199,6 +199,48 @@ class TurnCaptureTest {
             val (summary, source) = main.awaitEpisodes(1).single()
             assertEquals("We talked about one and two.", summary)
             assertEquals(Transcript.Source("test:main:chat", "test"), source)
+            assertEquals(listOf(false), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `the summary of a conversation tainted by the seal is saved as a tainted episode`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""").execute {
+            val conversation = current()
+            exchange(turn(conversation), "one", "a")
+            compact(turn(conversation), "We talked about one.")
+            store.conversations.markTainted(conversation, "a web page", Instant.now())
+            seal(conversation)
+
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `the summary of a conversation tainted before its compaction is saved as a tainted episode`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""").execute {
+            val conversation = current()
+            store.conversations.markTainted(conversation, "a web page", Instant.now())
+            exchange(turn(conversation), "read this page", "It says hello.")
+            compact(turn(conversation), "We read a page.")
+            compact(turn(conversation), "We read a page and said hello.")
+            seal(conversation)
+
+            assertEquals("We read a page and said hello.", main.awaitEpisodes(1).single().first)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `without a conversation store every summary counts as tainted`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""", bindStore = false).execute {
+            exchange(turn(), "one", "a")
+            compact(turn(), "We talked about one.")
+            seal(ConversationId("test"))
+
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
         }
     }
 
