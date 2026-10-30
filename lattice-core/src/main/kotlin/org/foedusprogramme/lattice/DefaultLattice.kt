@@ -14,6 +14,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.foedusprogramme.lattice.core.Activation
+import org.foedusprogramme.lattice.core.ChatTimeline
 import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.foedusprogramme.lattice.core.EmbeddingSpec
 import org.foedusprogramme.lattice.core.Engram
@@ -35,6 +36,7 @@ import org.foedusprogramme.lattice.core.NativeMemoryExtractor
 import org.foedusprogramme.lattice.core.NativeMemoryIngestor
 import org.foedusprogramme.lattice.core.PeriodLabels
 import org.foedusprogramme.lattice.core.PeriodRecord
+import org.foedusprogramme.lattice.core.PeriodService
 import org.foedusprogramme.lattice.core.RecallDating
 import org.foedusprogramme.lattice.core.RecallFormatter
 import org.foedusprogramme.lattice.core.RecallMarkers
@@ -45,6 +47,7 @@ import org.foedusprogramme.lattice.core.TemporalAnchor
 import org.foedusprogramme.lattice.core.TemporalAnchorResolver
 import org.foedusprogramme.lattice.core.TemporalIntent
 import org.foedusprogramme.lattice.core.TemporalIntentClassifier
+import org.foedusprogramme.lattice.core.TrustedPeriodLabels
 import org.foedusprogramme.lattice.core.TranscriptRenderer
 import org.foedusprogramme.lattice.core.UnparseableExtractionException
 import org.foedusprogramme.lattice.core.isMemoryModelInterrupted
@@ -77,19 +80,6 @@ internal fun interface SleepPass {
 }
 
 /**
- * Told on the narration thread when a chat's scene narration drains ([ScenePipeline]'s `onChatDrained`): the seam for
- * period formation. Reaches the graph through [DefaultLattice.graphAccess] only (it runs off the graph thread and must
- * not suspend), and must not throw.
- */
-internal fun interface ChatDrainedPass {
-    fun drained(lattice: DefaultLattice, chatKey: String)
-
-    companion object {
-        val NONE = ChatDrainedPass { _, _ -> }
-    }
-}
-
-/**
  * The [Lattice] implementation: the live calls over one graph and the sleep pipeline that maintains it.
  *
  * Threads. [LatticeGraph] is not thread-safe, so every graph access runs on one graph thread. Model calls never run
@@ -110,11 +100,14 @@ internal fun interface ChatDrainedPass {
  * advances it, [conversationSealed] finishes a conversation, the sleep's CATCH_UP runs its catch-up and PERIODS waits
  * for it to go idle first, and [close] waits for it to go idle before stopping the threads.
  *
+ * Periods. Alongside the pipeline runs one [PeriodService] ([periods]) on the same narration thread: a chat whose
+ * narration drains is formed there, the sleep's PERIODS forms every chat, a turn-end recall labels periods under scene
+ * trust ([TrustedPeriodLabels]), and the startup check runs once after opening. Without the pipeline there are no
+ * periods: recall labels them neutrally and [catalogue] and [timeline] answer null.
+ *
  * @param graphConfig the graph's tuning; null = the bge-m3 preset with the settings' switches ([graphConfig]).
  * @param catchUp the scene catch-up; null = the scene pipeline's when there is one (else CATCH_UP is reported skipped).
- * @param formPeriods period formation; null until the period former provides one (PERIODS is then reported skipped).
- * @param periodLabels the period tag labels of a turn-end recall; [PeriodLabels.NEUTRAL] until scene trust exists.
- * @param chatDrained told when a chat's scene narration drains; period formation hooks in here.
+ * @param formPeriods period formation; null = the period service's when there is one (else PERIODS is reported skipped).
  */
 internal class DefaultLattice(
     override val name: String,
@@ -122,9 +115,7 @@ internal class DefaultLattice(
     private val dependencies: LatticeDependencies,
     graphConfig: LatticeGraph.Config? = null,
     catchUp: SleepPass? = null,
-    private val formPeriods: SleepPass? = null,
-    private val periodLabels: PeriodLabels = PeriodLabels.NEUTRAL,
-    private val chatDrained: ChatDrainedPass = ChatDrainedPass.NONE,
+    formPeriods: SleepPass? = null,
 ) : Lattice {
     private val logger = LoggerFactory.getLogger(DefaultLattice::class.java)
     private val store = dependencies.store
@@ -239,13 +230,51 @@ internal class DefaultLattice(
             selfAliases = settings.assistantNames,
             trustPolicy = dependencies.sceneTrust,
             deadLetter = dependencies.deadLetter,
-            onChatDrained = { chatKey -> chatDrained.drained(this, chatKey) },
+            // Inline on the narration thread, so the pipeline's awaitIdle covers the formation it starts.
+            onChatDrained = { chatKey -> periods?.chatDrained(chatKey) },
         )
+    }
+
+    /**
+     * The period layer over the pipeline; null without it. Built here, off the graph thread and after the graph loaded:
+     * it reads the published catalogues once to seed them.
+     */
+    internal val periods: PeriodService? = scenes?.let { pipeline ->
+        try {
+            PeriodService(
+                graph = graphAccess,
+                source = checkNotNull(dependencies.conversations),
+                model = checkNotNull(model),
+                trust = pipeline.trust,
+                narrationExecutor = narrationExecutor,
+                texts = texts,
+                language = { settings.language },
+                fallbackLanguage = settings.language,
+                catalogueLanguages = listOf(settings.language, Language.EN, Language.ZH).distinct(),
+                userName = settings.userName,
+                assistantNames = settings.assistantNames,
+                deadLetter = dependencies.deadLetter,
+            )
+        } catch (e: Exception) {
+            shutdownExecutors()
+            throw e
+        }
     }
 
     /** CATCH_UP: [catchUp] when given, else the pipeline's catch-up, run off the scene threads. */
     private val sceneCatchUp: SleepPass? = catchUp ?: scenes?.let { pipeline ->
         SleepPass { runInterruptible(Dispatchers.IO) { pipeline.catchUp() } }
+    }
+
+    /** PERIODS: [formPeriods] when given, else the period service's; [runPhase] settles the scene work before either. */
+    private val periodPass: SleepPass? = formPeriods ?: periods?.let { periodFormationPass(it) }
+
+    /** The period tags of a turn-end recall: names under scene trust with the period layer, else neutral dates. */
+    private val periodLabels: PeriodLabels = if (periods != null) TrustedPeriodLabels else PeriodLabels.NEUTRAL
+
+    init {
+        // The startup check (it fills the trust cache), then one formation per chat, queued on the narration thread.
+        periods?.scheduleStartup()
     }
 
     /** A new graph takes the embedder's spec; a graph embedded with another model refuses this embedder. */
@@ -565,7 +594,9 @@ internal class DefaultLattice(
             }
             SleepPhase.PERIODS -> when {
                 !settings.scenes.enabled -> return "Scenes are off."
-                formPeriods == null -> return "Period formation is not available in this build."
+                periodPass == null && dependencies.conversations == null ->
+                    return "The host provides no conversations to read scenes from."
+                periodPass == null && model != null -> return "Period formation is not wired for this graph."
                 else -> Needs.MODEL
             }
             SleepPhase.CONSOLIDATE, SleepPhase.DECAY -> Needs.NOTHING
@@ -601,7 +632,7 @@ internal class DefaultLattice(
                 SleepPhase.PERIODS -> {
                     // Periods are formed from settled scenes: let the catch-up's narration finish first.
                     scenes?.let { pipeline -> runInterruptible(Dispatchers.IO) { pipeline.awaitIdle() } }
-                    checkNotNull(formPeriods).run(this)
+                    checkNotNull(periodPass).run(this)
                 }
                 // Merge before synthesizing (abstract a clean graph); synthesize after the merge so a fresh parent is
                 // never folded away by the same sleep. The judged half of the merge runs in its own phase.
@@ -762,6 +793,14 @@ internal class DefaultLattice(
                 embeddingDimension = store.embedding?.dimension,
             )
         }
+    }
+
+    override suspend fun catalogue(chatKey: String, language: Language?): String? = call {
+        periods?.catalogue(chatKey, language ?: settings.language)
+    }
+
+    override suspend fun timeline(chatKey: String): ChatTimeline? = call {
+        if (periods == null) null else onGraphBounded { g -> ChatTimeline.read(g, chatKey) }
     }
 
     override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = call { onGraphBounded(block) }

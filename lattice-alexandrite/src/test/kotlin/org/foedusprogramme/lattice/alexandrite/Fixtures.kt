@@ -21,6 +21,7 @@ import org.foedusprogramme.lattice.RememberOptions
 import org.foedusprogramme.lattice.SleepPhase
 import org.foedusprogramme.lattice.SleepReport
 import org.foedusprogramme.lattice.Transcript
+import org.foedusprogramme.lattice.core.ChatTimeline
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.LatticeGraph
 import org.foedusprogramme.lattice.core.LocalHashingEmbedder
@@ -61,6 +62,14 @@ internal class FakeLattice(override val name: String) : Lattice {
     /** What a recall answers, by its cue and options. */
     @Volatile
     var recalls: suspend (String, RecallOptions) -> Recall = { _, _ -> Recall("", emptyList(), tainted = false) }
+
+    /** What [catalogue] answers, by chat key and language. */
+    @Volatile
+    var catalogues: suspend (String, Language?) -> String? = { _, _ -> null }
+
+    /** What [timeline] answers, by chat key. */
+    @Volatile
+    var timelines: suspend (String) -> ChatTimeline? = { null }
 
     /** Suspends each sleep until it completes, when set. */
     @Volatile
@@ -107,6 +116,10 @@ internal class FakeLattice(override val name: String) : Lattice {
     }
 
     override suspend fun stats(): LatticeStats = LatticeStats(12, 30, 2, 0, 0, "bge-m3", 1024)
+
+    override suspend fun catalogue(chatKey: String, language: Language?): String? = catalogues(chatKey, language)
+
+    override suspend fun timeline(chatKey: String): ChatTimeline? = timelines(chatKey)
 
     override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = block(LatticeGraph(LocalHashingEmbedder()))
 
