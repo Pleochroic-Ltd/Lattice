@@ -57,7 +57,8 @@ import kotlin.concurrent.withLock
  * gone from the service (`404` to a post or a pull) was deleted there: the store moves its outbox and copy aside, stops
  * writing and says why in [failure]; it never creates the graph again under the deleted one's ops. A `401` or `403` (a key
  * the service refuses) waits in the outbox like any failure, but is a setup error that [failure] names until a post
- * lands. The outbox takes at most [Options.maxOutboxOps] ops and [Options.maxOutboxBytes] bytes: past either, later
+ * lands; at opening, it opens the copy last saved like an unreachable service, and without one it throws
+ * [PleochroicKeyRefusedException]. The outbox takes at most [Options.maxOutboxOps] ops and [Options.maxOutboxBytes] bytes: past either, later
  * writes stay on this device until it drains (lost at a restart), the oldest are kept, and [failure] says so.
  *
  * **Other devices' writes** reach the mirror on a conflict, on [pullRemoteChanges] and on a later [load]. Those
@@ -582,9 +583,17 @@ class PleochroicGraphStore(
         try {
             reload()
         } catch (e: RuntimeException) {
-            if (!transient(e)) throw e
+            val refused = e is PleochroicApiException && (e.status == 401 || e.status == 403)
+            if (!transient(e) && !refused) throw e
             val cached = files.readSnapshot()
             if (cached == null || device.slot == null) {
+                if (refused) {
+                    throw PleochroicKeyRefusedException(
+                        "Pleochroic refused the API key for graph '$graphName' (${e.message}), and this device has no copy " +
+                            "of it yet; set a valid key for the account.",
+                        e,
+                    )
+                }
                 throw PleochroicUnreachableException(
                     "Graph '$graphName' couldn't be loaded from Pleochroic and has no copy on this device yet (${e.message}); " +
                         "connect once to open it.",
@@ -594,7 +603,12 @@ class PleochroicGraphStore(
             logger.warn("Graph '{}' opens from this device's copy (seq {}): {}", graphName, cached.seq, e.message)
             loadCached(cached)
             fromServer = false
-            backOff((e as? PleochroicApiException)?.retryAfter)
+            if (refused) {
+                refused(e.message ?: "HTTP 401")
+                backOff(options.maxRetryDelay)
+            } else {
+                backOff((e as? PleochroicApiException)?.retryAfter)
+            }
         }
         ensureSlot()
         opened = true

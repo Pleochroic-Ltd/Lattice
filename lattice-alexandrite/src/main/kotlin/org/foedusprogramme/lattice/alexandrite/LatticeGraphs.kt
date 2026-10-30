@@ -60,6 +60,8 @@ internal class LatticeGraphs internal constructor(
     private val clock: Clock,
     private val io: CoroutineContext = Dispatchers.IO,
     private val pullInterval: Duration? = null,
+    /** Told why a graph could not open, once for each new reason. */
+    private val openFailed: (message: String, cause: Exception) -> Unit = { message, cause -> logger.warn(message, cause) },
 ) : Lifecycle {
     @Inject
     constructor(
@@ -85,6 +87,7 @@ internal class LatticeGraphs internal constructor(
     private var closed = false
     private val syncs = ConcurrentHashMap<AgentId, GraphSync>()
     private val stores = ConcurrentHashMap<AgentId, LatticeStore>()
+    private val failures = ConcurrentHashMap<AgentId, String>()
     private var puller: Job? = null
 
     override suspend fun onStart() {
@@ -108,7 +111,7 @@ internal class LatticeGraphs internal constructor(
 
     /**
      * The graph of [agent], opened when it is not yet; throws when it cannot be opened, and again without trying until
-     * [RETRY_SECONDS] have passed.
+     * [RETRY_SECONDS] have passed, twice that after a second failure in a row, and so on up to [MAX_RETRY_SECONDS].
      */
     suspend fun graph(agent: AgentId): Lattice = opening(agent).result.await().getOrThrow()
 
@@ -168,14 +171,14 @@ internal class LatticeGraphs internal constructor(
         check(!closed) { "Lattice is closing while Alexandrite stops, so the memory of agent '$agent' is closed." }
         val current = graphs[agent]
         if (current != null && !current.expired()) return current
-        val opening = Opening()
+        val opening = Opening(current?.retry?.let { minOf(it * 2, MAX_RETRY_SECONDS) } ?: RETRY_SECONDS)
         opening.result = scope.async(io + CoroutineName("lattice-open-$agent")) {
-            open(agent).onFailure { opening.failedAt = clock.instant() }
+            open(agent, opening.retry).onFailure { opening.failedAt = clock.instant() }
         }
         opening.also { graphs[agent] = it }
     }
 
-    private fun open(agent: AgentId): Result<Lattice> = try {
+    private fun open(agent: AgentId, retry: Long): Result<Lattice> = try {
         val sync = GraphSync(agent.value, scope, io)
         val dependencies = backends.dependencies(agent.value, sync)
         val lattice = try {
@@ -187,21 +190,28 @@ internal class LatticeGraphs internal constructor(
         sync.bind { opener.reload(lattice) }
         if (sync.remote) syncs[agent] = sync
         stores[agent] = dependencies.store
+        failures -= agent
         logger.info("Opened the memory of agent '{}'", agent)
         Result.success(lattice)
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
-        logger.warn(
-            "Cannot open the memory of agent '{}', which is tried again in {} s at its next use",
-            agent,
-            RETRY_SECONDS,
-            e,
-        )
+        // The same reason again (a refused key, a service down for long) is not worth a log line every few minutes.
+        val reason = e.message ?: e.toString()
+        if (failures.put(agent, reason) != reason) {
+            openFailed(
+                "Cannot open the memory of agent '$agent', which is tried again at its next use after $retry s, and less " +
+                    "often while it keeps failing",
+                e,
+            )
+        } else {
+            logger.debug("The memory of agent '{}' still cannot open, tried again in {} s: {}", agent, retry, reason)
+        }
         Result.failure(e)
     }
 
-    private inner class Opening {
+    /** One try at opening a graph; when it failed, the next waits [retry] seconds. */
+    private inner class Opening(val retry: Long) {
         lateinit var result: Deferred<Result<Lattice>>
 
         @Volatile
@@ -210,12 +220,13 @@ internal class LatticeGraphs internal constructor(
         /** Whether the open failed long enough ago to be tried again. */
         fun expired(): Boolean {
             val failed = failedAt ?: return false
-            return clock.instant() >= failed.plusSeconds(RETRY_SECONDS)
+            return clock.instant() >= failed.plusSeconds(retry)
         }
     }
 
     private companion object {
         const val RETRY_SECONDS = 30L
+        const val MAX_RETRY_SECONDS = 600L
         val CLOSE_MARGIN = 2.seconds
     }
 }

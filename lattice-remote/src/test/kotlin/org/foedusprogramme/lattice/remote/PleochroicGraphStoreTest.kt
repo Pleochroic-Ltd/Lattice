@@ -303,6 +303,24 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `a key refused at opening opens this device's copy, or fails clearly without one`() {
+        store().also { it.declareEmbedding(SPEC) }.apply { putEngram(engram(1)); close() }
+        val refused = PleochroicClient("revoked-key", server.baseUrl)
+
+        val cached = store(client = refused)
+        assertEquals(setOf(1L), cached.load().engrams.map { it.id }.toSet())
+        assertContains(cached.failure.orEmpty(), "Pleochroic refused the API key")
+        cached.putEngram(engram(2))
+        assertEquals(1, cached.pendingWrites, "writes wait on the device")
+        assertEquals(setOf(1L), server.graph(GRAPH)!!.engramIds)
+
+        val fresh = store(device = "b", client = refused)
+        val e = assertFailsWith<PleochroicKeyRefusedException> { fresh.load() }
+        assertContains(e.message.orEmpty(), "refused the API key for graph '$GRAPH'")
+        assertContains(e.message.orEmpty(), "no copy")
+    }
+
+    @Test
     fun `a post refused as malformed is set aside and the rest goes on`() {
         val store = store().also { it.declareEmbedding(SPEC) }
         server.rejectNextOps = 1
