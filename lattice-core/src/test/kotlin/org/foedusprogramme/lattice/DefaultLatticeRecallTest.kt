@@ -10,10 +10,15 @@ import org.foedusprogramme.lattice.core.PeriodLabels
 import org.foedusprogramme.lattice.core.RecallFormatter
 import org.foedusprogramme.lattice.core.RecallMarkers
 import org.foedusprogramme.lattice.core.Reinforce
+import org.foedusprogramme.lattice.core.SceneRecord
 import org.foedusprogramme.lattice.core.TestLatticeStore
+import org.foedusprogramme.lattice.core.ThreadRecord
+import org.foedusprogramme.lattice.core.ThreadRole
+import org.foedusprogramme.lattice.core.ThreadState
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -237,5 +242,47 @@ class DefaultLatticeRecallTest {
         assertEquals(0, stats.scenes)
         assertEquals(0, stats.periods)
         lattice.close()
+    }
+    // --- taint -------------------------------------------------------------------------------------------------------
+
+    /**
+     * A clean set-up memory of a CLOSED thread, opened by a scene whose hub is [hubTainted] (no hub when null): recall
+     * of the set-up names the thread.
+     */
+    private suspend fun threadRecall(hubTainted: Boolean?): Recall {
+        val lattice = LatticeTestKit.open(graphConfig = LatticeGraph.Config())
+        lattice.withGraph { g ->
+            val setup = g.remember(SETUP)
+            val reveal = g.remember("the user revealed that the anniversary surprise was a trip to the coast")
+            g.putScene(SceneRecord(1, "the promise", "chat-1:c1", "chat-1", 100, 109))
+            if (hubTainted != null) {
+                val hub = g.materializeScene(g.scene(1)!!, "That evening the user promised me a surprise.", listOf(setup), tainted = hubTainted)
+                check(hub > 0)
+            }
+            val thread = g.putThread(
+                ThreadRecord(
+                    0, "chat-1", "what the fetched page said to promise", state = ThreadState.CLOSED,
+                    openedSceneId = 1, closedSceneId = 2, name = "the anniversary surprise",
+                ),
+            )
+            g.linkThread(thread, setup, ThreadRole.SETUP)
+            g.linkThread(thread, reveal, ThreadRole.RESOLVE)
+        }
+        val recall = lattice.recall(SETUP, RecallOptions(explicit = true))
+        assertTrue("the anniversary surprise" in recall.text, "the block names the thread: ${recall.text}")
+        assertTrue(lattice.withGraph { g -> recall.hits.none { g.engram(it.id)!!.tainted } }, "no hit is tainted itself")
+        lattice.close()
+        return recall
+    }
+
+    @Test
+    fun aThreadNameWrittenFromATaintedSceneTaintsTheRecall() = runBlocking {
+        assertTrue(threadRecall(hubTainted = true).tainted, "the thread's name came from a tainted narration")
+        assertTrue(threadRecall(hubTainted = null).tainted, "no hub tells what the narration read: tainted")
+        assertFalse(threadRecall(hubTainted = false).tainted, "a clean scene's thread leaves the recall clean")
+    }
+
+    private companion object {
+        const val SETUP = "the user promised a surprise for the anniversary"
     }
 }

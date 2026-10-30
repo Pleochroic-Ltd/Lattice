@@ -11,6 +11,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
 import java.util.concurrent.FutureTask
@@ -193,6 +194,9 @@ class ScenePipeline(
             task.get()
         } catch (e: ExecutionException) {
             throw e.cause ?: e
+        } catch (e: CancellationException) {
+            // The shutdown dropped it before it ran; a CancellationException would read as the caller's own cancellation.
+            throw IllegalStateException("The capture thread was shut down before the scene work ran.", e)
         }
     }
 
@@ -479,8 +483,8 @@ class ScenePipeline(
                 logger.info("Scene chunk extraction cut off scene={} messages={}..{}; nothing counted", sceneId, from, end)
                 return
             }
-            val settled = graph.withGraph { g ->
-                val work = g.sceneWork(sceneId) ?: return@withGraph false
+            val settled = settle { g ->
+                val work = g.sceneWork(sceneId) ?: return@settle false
                 val next = when {
                     failure == null -> work.copy(extractedThrough = end, extractAttempts = 0, chunksDone = work.chunksDone + 1)
                     work.extractAttempts + 1 >= MAX_CHUNK_ATTEMPTS ->
@@ -538,12 +542,25 @@ class ScenePipeline(
                     return it
                 }
             }
-            graph.withGraph { g -> g.putSceneState(cursor = cursor) }
+            settle { g -> g.putSceneState(cursor = cursor) }
         }
         cursor = cursor.copy(segmentedThrough = through, fallbackThrough = null, extractAttempts = 0, blockedSince = null)
         graph.withGraph { g -> g.putSceneState(cursor = cursor) }
         logger.info("Messages extracted without a scene after failed segmentations conversation={} through={}", info.id, through)
         return cursor
+    }
+
+    /**
+     * [GraphAccess.withGraph] with a pending interrupt held off, then set again: the bookkeeping of a chunk whose
+     * memories landed must land too, or the chunk is extracted once more after a restart.
+     */
+    private fun <T> settle(block: (LatticeGraph) -> T): T {
+        val interrupted = Thread.interrupted()
+        try {
+            return graph.withGraph(block)
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
     }
 
     // --- hand-over to narration ----------------------------------------------------------------------------------

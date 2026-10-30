@@ -416,8 +416,6 @@ class LatticeGraph(
         val periodRecall: Boolean = false,
         /** Contract (b): a RELEVANCE cue with a resolved POINT anchor order-nudges the base toward the focal month. */
         val temporalRerank: Boolean = false,
-        /** Scoped out: off-thread LLM date-parser fallback when the grammar misses. Stays off (resolver abstains). */
-        val llmAnchorFallback: Boolean = false,
         /** Rerank strength: the base score is scaled by `(1 + lambda*timeProximity)`. Inert while [temporalRerank] off. */
         val temporalRerankLambda: Double = 0.15,
         /** Rerank month-distance half-life: proximity = `0.5^(monthDist/halflife)`. Inert while [temporalRerank] off. */
@@ -2453,9 +2451,13 @@ class LatticeGraph(
             if (na.supersededBy == nb.id || nb.supersededBy == na.id) continue
             if (guardedCandidate(cand.aId, cand.bId, cand.cosine) == null) continue
             val verdict = if (outcome == JudgeOutcome.SAME) VERDICT_SAME else VERDICT_KEEP
-            store.putVerdict(VerdictRecord(cand.hashLo, cand.hashHi, theJudge.verdictKey, verdict, config.judgeVotes, now()))
-            verdicts[Triple(cand.hashLo, cand.hashHi, theJudge.verdictKey)] = verdict
-            if (outcome == JudgeOutcome.SAME && supersedeJudged(na, nb, cand.cosine, cand.crossLingual, touched)) superseded++
+            // The verdict and the supersession it records land together, the canonical note's widened span and
+            // taint included.
+            store.batch {
+                store.putVerdict(VerdictRecord(cand.hashLo, cand.hashHi, theJudge.verdictKey, verdict, config.judgeVotes, now()))
+                verdicts[Triple(cand.hashLo, cand.hashHi, theJudge.verdictKey)] = verdict
+                if (outcome == JudgeOutcome.SAME && supersedeJudged(na, nb, cand.cosine, cand.crossLingual, touched)) superseded++
+            }
         }
         return superseded
     }
@@ -2780,7 +2782,8 @@ class LatticeGraph(
 
     /**
      * The RESOLVE memories of every CLOSED thread that has [setupId] as a SETUP, currentEngram-redirected and
-     * live, in link order. Direction comes from the ledger's roles only, never from an edge.
+     * live: thread by thread, each thread's oldest first (link order is not stable across a reload). Direction comes
+     * from the ledger's roles only, never from an edge.
      */
     fun closedResolvesOf(setupId: Long): List<Long> = sceneIndex.closedResolvesOf(setupId)
 
@@ -2808,6 +2811,9 @@ class LatticeGraph(
      *    scene (its narration already tells the outcome).
      */
     fun threadStatusOf(id: Long): ThreadStatus = sceneIndex.threadStatusOf(id)
+
+    /** Whether [thread]'s name or description may carry untrusted text (see [SceneIndex.threadTextTainted]). */
+    fun threadTextTainted(thread: ThreadRecord): Boolean = sceneIndex.threadTextTainted(thread)
 
     // --- PERIODS side-store (delegates to [PeriodIndex]) -----------------------------------------
 
@@ -3421,8 +3427,11 @@ class LatticeGraph(
         for (childId in present) nodes[childId]?.let { parent.widenSaid(it.saidFrom, it.saidTo) }
         nodes[parent.id] = parent
         adjacency[parent.id] = HashMap()
-        store.putEngram(parent)
-        for (childId in present) link(parent.id, childId, Edge.Type.ABSTRACTS, 0.85)
+        // The parent and its ABSTRACTS edges land together: a parent stored without its children abstracts nothing.
+        store.batch {
+            store.putEngram(parent)
+            for (childId in present) link(parent.id, childId, Edge.Type.ABSTRACTS, 0.85)
+        }
         return parent.id
     }
 
@@ -3469,13 +3478,19 @@ class LatticeGraph(
         // narrative over unrelated facts). Average pairwise MEMBER cosine — a quality screen on the
         // already-formed, same-day, co-retrieved cluster; NOT cosine deciding time (see the knob doc).
         if (!skipCohesion && cohesion(present) < config.episodeMinMemberCohesion) return REFUSED
-        // The hub inherits the shared day, but only when the temporal layer persists dates at all.
-        val hub = newHub(
-            text, embedder.embed(text), salience, eventDate = eventDate.takeIf { config.temporalLayer },
-            tainted = present.any { nodes.getValue(it).tainted },
-        )
-        bindHubMembers(hub.id, present)
-        return hub.id
+        val embedding = embedder.embed(text)
+        var hubId = REFUSED
+        // The hub and its EPISODE_OF edges land together.
+        store.batch {
+            // The hub inherits the shared day, but only when the temporal layer persists dates at all.
+            val hub = newHub(
+                text, embedding, salience, eventDate = eventDate.takeIf { config.temporalLayer },
+                tainted = present.any { nodes.getValue(it).tainted },
+            )
+            bindHubMembers(hub.id, present)
+            hubId = hub.id
+        }
+        return hubId
     }
 
     /**
@@ -3556,23 +3571,28 @@ class LatticeGraph(
             ?.let { nodes[it] }
             ?.takeIf { it.isEpisodeHub }
         val tainted = taintedNarration || present.any { nodes.getValue(it).tainted }
-        val hub = if (existing != null) {
-            existing.copy(
-                content = text,
-                embedding = embedding,
-                eventDate = scene.dateFrom ?: existing.eventDate,
-                sourceMessageId = scene.lastMessageId,
-                tainted = existing.tainted || tainted,
-            ).also {
-                nodes[it.id] = it
-                store.putEngram(it)
+        var hubId = REFUSED
+        // The hub, its EPISODE_OF edges and the scene's pointer to it land together.
+        store.batch {
+            val hub = if (existing != null) {
+                existing.copy(
+                    content = text,
+                    embedding = embedding,
+                    eventDate = scene.dateFrom ?: existing.eventDate,
+                    sourceMessageId = scene.lastMessageId,
+                    tainted = existing.tainted || tainted,
+                ).also {
+                    nodes[it.id] = it
+                    store.putEngram(it)
+                }
+            } else {
+                newHub(text, embedding, salience, eventDate = scene.dateFrom, sourceMessageId = scene.lastMessageId, tainted = tainted)
             }
-        } else {
-            newHub(text, embedding, salience, eventDate = scene.dateFrom, sourceMessageId = scene.lastMessageId, tainted = tainted)
+            bindHubMembers(hub.id, present)
+            putScene(scene.copy(hubEngramId = hub.id))
+            hubId = hub.id
         }
-        bindHubMembers(hub.id, present)
-        putScene(scene.copy(hubEngramId = hub.id))
-        return hub.id
+        return hubId
     }
 
     /** [given] widened by [current]'s range and dates (min first / max last); everything else from [given]. */

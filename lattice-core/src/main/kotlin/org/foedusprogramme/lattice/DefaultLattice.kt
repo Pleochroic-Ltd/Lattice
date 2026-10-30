@@ -61,10 +61,14 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.FutureTask
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resumeWithException
 import kotlin.time.Duration
 import kotlin.time.TimeSource
@@ -127,8 +131,17 @@ internal class DefaultLattice(
 
     @Volatile
     private var graphThread: Thread? = null
-    private val graphExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "lattice-$name-graph").apply { isDaemon = true }.also { graphThread = it }
+
+    /** Set by [close]: the store is flushed and closed as the graph executor terminates, after its last task ran. */
+    @Volatile
+    private var closeStoreOnStop = false
+    private val graphExecutor: ExecutorService = object : ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue(),
+        { r -> Thread(r, "lattice-$name-graph").apply { isDaemon = true }.also { graphThread = it } },
+    ) {
+        override fun terminated() {
+            if (closeStoreOnStop) closeStore()
+        }
     }
     private val captureExecutor = singleThread("capture")
     private val narrationExecutor = singleThread("narrate")
@@ -189,25 +202,41 @@ internal class DefaultLattice(
     /**
      * The graph for code that blocks instead of suspending (the scene pipeline on the capture and narration threads):
      * each block runs on the graph thread and the caller waits for it. Never call it on the graph thread itself.
+     *
+     * An interrupt withdraws a block that has not started: it never runs, and the call throws
+     * [MemoryModelInterruptedException]. A block that has started is waited for and its outcome returned, with the
+     * interrupt flag set again: a caller must never report as failed a write that landed.
      */
     internal val graphAccess: GraphAccess = object : GraphAccess {
         override fun <T> withGraph(block: (LatticeGraph) -> T): T {
             check(Thread.currentThread() !== graphThread) {
                 "GraphAccess.withGraph was called on the graph thread of '$name', which would wait for itself."
             }
-            val task = FutureTask(Callable { block(graph) })
+            val state = AtomicInteger(QUEUED)
+            val task = FutureTask(Callable { if (state.compareAndSet(QUEUED, STARTED)) block(graph) else null })
             try {
                 graphExecutor.execute(task)
             } catch (e: RejectedExecutionException) {
                 throw IllegalStateException("Lattice '$name' is closed; open the graph again to use it.", e)
             }
-            return try {
-                task.get()
+            var interrupted = false
+            try {
+                while (true) {
+                    try {
+                        @Suppress("UNCHECKED_CAST")
+                        return task.get() as T
+                    } catch (e: InterruptedException) {
+                        interrupted = true
+                        if (state.compareAndSet(QUEUED, WITHDRAWN)) {
+                            task.cancel(false)
+                            throw MemoryModelInterruptedException("Waiting for the graph of '$name' was interrupted.", e)
+                        }
+                    }
+                }
             } catch (e: ExecutionException) {
                 throw e.cause ?: e
-            } catch (e: InterruptedException) {
-                Thread.currentThread().interrupt()
-                throw MemoryModelInterruptedException("Waiting for the graph of '$name' was interrupted.", e)
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt()
             }
         }
     }
@@ -310,7 +339,13 @@ internal class DefaultLattice(
         onGraphBounded { g ->
             val hits = dispatchTemporal(g, cue, options.limit ?: settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
             val text = RecallFormatter.format(hits, markers, g.temporalLayerEnabled, lookup(g, language), settings.userName, dating)
-            val tainted = hits.any { h -> h.engram.tainted || g.evidenceQuotes(h.engram.id).any { it.tainted } }
+            // Beyond the hits and their quotes the block shows thread names, written by a scene's narration; a scene
+            // title rides only its own hub and a period name only a trusted scene.
+            val tainted = hits.any { h ->
+                val id = h.engram.id
+                h.engram.tainted || g.evidenceQuotes(id).any { it.tainted } ||
+                    g.threadStatusOf(id).let { s -> (s.closed + s.open).any(g::threadTextTainted) }
+            }
             Recall(text, hits.map(::recallHit), tainted)
         }
     }
@@ -811,8 +846,10 @@ internal class DefaultLattice(
      * Refuses new calls, waits up to [LatticeSettings.shutdownTimeout] for the calls in flight (a running sleep stops at
      * its next step) and then for the scene work queued so far, then stops the threads and flushes and closes the store
      * as the graph thread's last task. Work still running at the deadline is interrupted on the capture and narration
-     * threads (a scene model call cut off this way counts no attempt); the graph thread is never interrupted. A second
-     * close waits for the first.
+     * threads (a scene model call cut off this way counts no attempt) and work still queued there is dropped, failing
+     * whoever waits on it with [IllegalStateException]. The graph thread is never interrupted: it gets another
+     * [LatticeSettings.shutdownTimeout] of its own to run what is queued, and if it is still busy after that the store
+     * closes when its last task ends, never before. A second close waits for the first.
      */
     override suspend fun close(): Unit = withContext(NonCancellable) {
         val first = synchronized(lifecycle) {
@@ -845,35 +882,39 @@ internal class DefaultLattice(
         withContext(Dispatchers.IO) {
             stop(captureExecutor, remaining(), interrupt = true)
             stop(narrationExecutor, remaining(), interrupt = true)
-            try {
-                graphExecutor.execute {
-                    try {
-                        (store as? Flushable)?.flush()
-                    } catch (e: Exception) {
-                        logger.warn("Lattice {} close: flushing the store failed: {}", name, e.message, e)
-                    }
-                    try {
-                        store.close()
-                    } catch (e: Exception) {
-                        logger.warn("Lattice {} close: closing the store failed: {}", name, e.message, e)
-                    }
-                }
-            } catch (e: RejectedExecutionException) {
-                logger.warn("Lattice {} close: the graph thread was already stopped; the store stays open", name)
-            }
-            if (!stop(graphExecutor, remaining(), interrupt = false)) {
-                logger.error("Lattice {} close: the graph thread is still busy; the store closes when it finishes", name)
+            // The graph gets a wait of its own (its tasks are short); the store closes once its last task has run.
+            closeStoreOnStop = true
+            if (!stop(graphExecutor, settings.shutdownTimeout, interrupt = false)) {
+                logger.error(
+                    "Lattice {} close: the graph thread is still busy after {}; the store closes when it finishes",
+                    name, settings.shutdownTimeout,
+                )
             }
         }
         closedDone.complete(Unit)
         Unit
     }
 
+    /** Flushes and closes the store; on the graph thread as it terminates, so no graph task can write after it. */
+    private fun closeStore() {
+        try {
+            (store as? Flushable)?.flush()
+        } catch (e: Exception) {
+            logger.warn("Lattice {} close: flushing the store failed: {}", name, e.message, e)
+        }
+        try {
+            store.close()
+        } catch (e: Exception) {
+            logger.warn("Lattice {} close: closing the store failed: {}", name, e.message, e)
+        }
+    }
+
     /** Shuts [executor] down and waits up to [timeout]; true when it terminated. */
     private fun stop(executor: ExecutorService, timeout: Duration, interrupt: Boolean): Boolean {
         executor.shutdown()
         val done = executor.awaitTermination(timeout.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-        if (!done && interrupt) executor.shutdownNow()
+        // A queued task the executor drops never completes on its own: cancel it, so whoever waits on it hears.
+        if (!done && interrupt) executor.shutdownNow().forEach { (it as? Future<*>)?.cancel(false) }
         return done
     }
 
@@ -924,12 +965,17 @@ internal class DefaultLattice(
 
     /**
      * Runs [block] on this executor and suspends until it ends. On cancellation the task is cancelled without an
-     * interrupt: one that hasn't started never runs, one that has runs to completion and its result is dropped.
+     * interrupt: one that hasn't started never runs, one that has runs to completion and its result is dropped. A task
+     * [close] drops before it ran fails the caller with [IllegalStateException].
      */
     private suspend fun <T> ExecutorService.await(block: () -> T): T = suspendCancellableCoroutine { cont ->
         val task = object : FutureTask<T>(Callable(block)) {
             override fun done() {
-                if (isCancelled) return
+                if (isCancelled) {
+                    // Cancelled by the close; a caller that cancelled it itself is no longer active.
+                    if (cont.isActive) cont.resumeWithException(IllegalStateException("Lattice '$name' was closed before the call ran."))
+                    return
+                }
                 try {
                     cont.resumeWith(Result.success(get()))
                 } catch (e: ExecutionException) {
@@ -959,6 +1005,11 @@ internal class DefaultLattice(
     }
 
     companion object {
+        /** A [graphAccess] block's state: waiting on the graph thread, running there, or withdrawn by an interrupt. */
+        private const val QUEUED = 0
+        private const val STARTED = 1
+        private const val WITHDRAWN = 2
+
         /** Salience of an episode node (a whole-conversation summary). */
         private const val EPISODE_SALIENCE = 0.6
 

@@ -204,8 +204,12 @@ object PeriodFields {
         else -> "$from to $to"
     }
 
-    /** How the prompts name [language]: its English display name (`Chinese`, `English`), else its tag. */
+    /**
+     * How the prompts name [language]: `Simplified Chinese` for Chinese, else its English display name (`English`,
+     * `German`), else its tag.
+     */
     fun languageLabel(language: Language): String {
+        if (RecallMarkers.isChinese(language)) return "Simplified Chinese"
         val locale = Locale.forLanguageTag(language.tag.replace('_', '-'))
         val name = locale.getDisplayName(Locale.ENGLISH)
         return name.takeIf { it.isNotBlank() && !it.equals(language.tag, ignoreCase = true) } ?: language.tag
