@@ -4,6 +4,8 @@ import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.MemoryTask
+import org.unitedsoftware.alexandrite.runtime.RuntimeStartException
+import org.unitedsoftware.alexandrite.testkit.ScriptedModel
 import java.time.LocalTime
 import java.time.ZoneId
 import java.time.ZoneOffset
@@ -14,6 +16,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlin.test.fail
 import kotlin.time.Duration.Companion.seconds
 
 class LatticeConfigTest {
@@ -167,5 +170,39 @@ class LatticeConfigTest {
         assertContains(refused(config("""{"sleep": {"zone": "Mars/Olympus"}}""")), "sleep.zone is no time zone")
         assertContains(refused(config("""{"zone": "nowhere"}""")), "zone is no time zone")
         assertContains(refused(config("""{"userName": " "}""")), "userName may not be blank")
+    }
+
+    // At start.
+
+    @Test
+    fun `a bad config stops the start with the path and the fix`() {
+        val error = assertFailsWith<RuntimeStartException> {
+            latticeHarness(config("""{"recall": {"limit": 99}}""")).execute { fail("the block ran") }
+        }
+
+        assertContains(error.message!!, "Invalid config at 'plugins.lattice': recall.limit must be between 1 and 50.")
+    }
+
+    @Test
+    fun `a host model must name an endpoint the host has`() {
+        val error = assertFailsWith<RuntimeStartException> {
+            latticeHarness(config("""{"model": {"kind": "host", "default": "nowhere/model"}}"""), backends = null)
+                .execute { fail("the block ran") }
+        }
+
+        assertContains(
+            error.message!!,
+            "names the model endpoint 'nowhere', which no model provider contributes: use one of the host's endpoints",
+        )
+    }
+
+    @Test
+    fun `a host model that names a host endpoint starts`() {
+        val config = config("""{"model": {"kind": "host", "default": "scripted/test-model"}}""")
+        var started = false
+
+        latticeHarness(config, backends = null) { model(ScriptedModel()) }.execute { started = true }
+
+        assertTrue(started)
     }
 }
