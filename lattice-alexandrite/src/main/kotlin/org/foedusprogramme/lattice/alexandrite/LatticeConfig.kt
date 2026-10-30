@@ -31,6 +31,8 @@ internal class LatticeConfig(
     val assistantNames: List<String> = emptyList(),
     /** The zone of dates in memories and of the sleep time, the host's when null. */
     val zone: String? = null,
+    /** `operators`, `trusted` or `everyone`: the least a turn's sender must be for the memory to be used in it. */
+    val access: String = OPERATORS,
     val storage: StorageConfig = StorageConfig(),
     val embedder: EmbedderConfig? = null,
     val model: ModelConfig? = null,
@@ -48,6 +50,10 @@ internal class LatticeConfig(
         }
         require(assistantNames.none { it.isBlank() }) { "assistantNames may not hold a blank name: remove it." }
         zone?.let { zoneOf("zone", it) }
+        require(access == OPERATORS || access == TRUSTED || access == EVERYONE) {
+            "access must be \"$OPERATORS\", \"$TRUSTED\" or \"$EVERYONE\": the least a turn's sender must be for the " +
+                "memory to be recalled into, captured from or searched in the turn."
+        }
         storage.check()
         requireNotNull(embedder) {
             "embedder is not set: add one, such as {\"kind\": \"openai\", \"baseUrl\": \"http://127.0.0.1:8080/v1\", " +

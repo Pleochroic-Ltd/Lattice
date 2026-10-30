@@ -27,10 +27,12 @@ import org.unitedsoftware.alexandrite.sdk.turn.ContextCompacted
 import org.unitedsoftware.alexandrite.sdk.turn.ConversationSealed
 import org.unitedsoftware.alexandrite.sdk.turn.TurnCommitted
 import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Batches the words of committed message turns per conversation and captures each batch into its agent's graph, every
- * few turns and at each compaction and seal, on one worker that takes the events in the order they happened.
+ * few turns and at each compaction and seal, on one worker that takes the events in the order they happened. A turn
+ * whose actor [MemoryAccess] turns away is left out; what anyone but an operator said is captured tainted.
  *
  * With scenes on, nothing is batched: each committed message turn tells its graph that the conversation has new
  * messages, which the graph reads back from the host's stores, and each seal tells it the conversation is finished.
@@ -42,6 +44,7 @@ internal class TurnCapture(
     private val taints: TurnTaints,
     private val scenes: SceneHost,
     private val scope: PluginScope,
+    private val access: MemoryAccess,
 ) : Lifecycle {
     private val config = config.capture
     private val events = Channel<Event>(CAPACITY)
@@ -52,6 +55,9 @@ internal class TurnCapture(
 
     /** Confined to the worker. */
     private val pending = LinkedHashMap<ConversationId, Batch>()
+
+    /** The conversations where anyone but an operator had a turn, whose summaries are kept tainted. */
+    private val foreign = ConcurrentHashMap.newKeySet<ConversationId>()
 
     /** The last compaction summary of each conversation, confined to the worker. */
     private val summaries = HashMap<ConversationId, Summary>()
@@ -70,22 +76,27 @@ internal class TurnCapture(
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
         if (!config.enabled || !turn.remembers()) return
+        if (taintsMemory(turn.actor)) foreign += turn.conversation
+        if (!access.admits(turn)) return
         if (scenes.live) {
             offer(Event.Advanced(turn))
             return
         }
         val lines = lines(entries)
         if (lines.isEmpty()) return
-        offer(Event.Committed(turn, lines, taints.tainted(turn)))
+        offer(Event.Committed(turn, lines, taints.tainted(turn) || taintsMemory(turn.actor)))
     }
 
     /** A summary is written by the model over the whole conversation, so it is as tainted as the conversation. */
     suspend fun compacted(turn: TurnInfo, summary: String) {
-        if (config.enabled && turn.lineage == null) offer(Event.Compacted(turn, summary, taints.tainted(turn.conversation)))
+        if (!config.enabled || turn.lineage != null) return
+        val conversation = turn.conversation
+        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || conversation in foreign
+        offer(Event.Compacted(turn, summary, tainted))
     }
 
     suspend fun sealed(turn: TurnInfo, sealed: ConversationId) {
-        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed)))
+        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || sealed in foreign))
     }
 
     private fun offer(event: Event) {
@@ -120,6 +131,7 @@ internal class TurnCapture(
             }
 
             is Event.Sealed -> {
+                foreign -= event.sealed
                 if (scenes.live) seal(event.turn, event.sealed) else if (config.onSeal) flush(event.sealed)
                 val summary = summaries.remove(event.sealed)
                 if (summary != null && config.episodes) {
@@ -165,6 +177,8 @@ internal class TurnCapture(
     /** Tells the graph of the sealed [conversation] that it takes no more messages. */
     private suspend fun seal(turn: TurnInfo, conversation: ConversationId) {
         try {
+            // A conversation that no admitted turn brought in stays out, also when it is sealed.
+            if (scenes.registry.find(conversation.value) == null && !access.admits(turn)) return
             val registered = scenes.register(conversation) ?: return
             graphs.graph(AgentId(registered.agent)).conversationSealed(conversation.value)
         } catch (e: CancellationException) {

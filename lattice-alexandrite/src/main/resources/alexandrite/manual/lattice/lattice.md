@@ -4,7 +4,15 @@ How Lattice gives each agent a long-term memory: what it recalls into a turn, wh
 
 ## What happens on its own
 
-Each agent has one memory graph, shared by all its chats. Before a message turn, Lattice recalls what the message brings
+Each agent has one memory graph, shared by all its chats, so what one chat said can come back in another. `access`
+decides who reaches it: by default only the agent's operators (whom their channel counts operators in the chat), or
+also trusted users (`trusted`: whom the channel trusts in the chat, or who are named in `scenes.trustedSenders`), or
+everyone (`everyone`). A turn whose sender is below that level gets no recall and no period catalogue, is not captured,
+and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. A turn
+with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`. Whatever anyone but an
+operator says or saves is kept tainted, so it never comes back as trusted content.
+
+Before a message turn, Lattice recalls what the message brings
 back and adds it to the turn as a memory block. A block that holds memories of turns that read untrusted content (a web
 page, a tool's output, an untrusted person's message) comes as untrusted content and taints the turn. When recall is
 slow or fails, the turn goes on without memories.
@@ -20,8 +28,8 @@ occasion), extracts the memories of each ended scene, and writes a short summary
 conversation sealed with `/new` is cut to its end. Heartbeats and sub-agent runs stay out of a chat's scenes. Whatever
 a turn or a seal leaves uncut is caught up in the nightly sleep.
 
-A scene is trusted only when everyone who wrote in it is an operator or a trusted user of the chat (or named in
-`scenes.trustedSenders`), every tool result in it comes from a read-only tool or one that changes only the agent's own
+A scene is trusted only when everyone who wrote in it is an operator of the chat (what anyone else says is tainted),
+every tool result in it comes from a read-only tool or one that changes only the agent's own
 state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quoted unverified or written after the
 conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
 Lattice learns each tool's risk when a turn offers it.
@@ -41,7 +49,7 @@ consolidates memories, merges duplicates, writes summaries of clusters and lets 
   remembering what it finds. Use it for questions about the past, lists and counts that the recalled block does not
   answer. Its result is untrusted when it holds memories of tainted turns.
 - lattice.save: saves one memory as written, with an importance from 0 to 1. Write one self-contained statement that
-  names who and when. A save from a tainted conversation is saved tainted.
+  names who and when. A save from a tainted conversation, or by anyone but an operator, is saved tainted.
 - lattice.timeline: shows the chat's eras and periods with their dates; given a period or an era (a name, part of one,
   an old name, or a date inside it), its summary and its scenes. A scene with untrusted content is listed by its date
   only. A period whose name lists withhold, found by a date, shows its name and summary as untrusted content. Needs
@@ -61,6 +69,8 @@ Lattice reads `plugins.lattice`:
 - `assistantNames`: the names the assistant goes by in conversation, so its own memories are written in the first person
   and never become entities.
 - `zone`: the zone of dates in memories and of the sleep time, the host's when unset.
+- `access`: `operators` (the default), `trusted` or `everyone`: the least a turn's sender must be for the memory to be
+  recalled into, captured from, searched, saved to or shown in the turn.
 - `storage.kind`: `local` keeps each agent's graph in a SQLite file in the plugin's data directory; `pleochroic` keeps
   it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>`.
 - `embedder.kind`: `openai` for an OpenAI-compatible embeddings API (`baseUrl`, `model`, `apiKey`, `dimension`), or

@@ -31,7 +31,7 @@ class RecallInjectorTest {
 
     private suspend fun PluginHarness.Running.inject(
         text: String,
-        turn: TurnInfo = testTurn(),
+        turn: TurnInfo = operatorTurn(),
     ): HookDecision<TurnContext> {
         val injector = getAll<Hook>().filterIsInstance<RecallInjector>().single()
         return injector.intercept(TurnContext(turn, text, emptyList()))
@@ -123,7 +123,7 @@ class RecallInjectorTest {
             assertEquals(HookDecision.Continue, inject("beat", testTurn(TurnKind.HEARTBEAT)))
             assertEquals(HookDecision.Continue, inject("task", testDelegatedTurn()))
             assertEquals(HookDecision.Continue, inject("   "))
-            assertEquals("<memories>code</memories>", inject("hi", testTurn { agent(AgentId("coder")) }).item().text)
+            assertEquals("<memories>code</memories>", inject("hi", operatorTurn { agent(AgentId("coder")) }).item().text)
         }
 
         assertTrue(main.cues.isEmpty())

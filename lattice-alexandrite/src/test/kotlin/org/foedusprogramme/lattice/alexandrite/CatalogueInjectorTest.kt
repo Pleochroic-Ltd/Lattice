@@ -27,7 +27,7 @@ class CatalogueInjectorTest {
     private val base = PromptSection("persona", "You are Mia.", stable = true)
     private val asked = CopyOnWriteArrayList<Pair<String, Language?>>()
 
-    private suspend fun PluginHarness.Running.sections(turn: TurnInfo = testTurn()): HookDecision<PromptSections> {
+    private suspend fun PluginHarness.Running.sections(turn: TurnInfo = operatorTurn()): HookDecision<PromptSections> {
         val injector = getAll<Hook>().filterIsInstance<CatalogueInjector>().single()
         return injector.intercept(PromptSections(turn, listOf(base)))
     }
@@ -62,11 +62,27 @@ class CatalogueInjectorTest {
         catalogue("catalogue")
 
         latticeHarness(config(SCENES_ON), opener).execute {
-            assertEquals("catalogue", sections(testTurn(TurnKind.HEARTBEAT)).added().text)
-            assertEquals(HookDecision.Continue, sections(testDelegatedTurn()))
+            assertEquals("catalogue", sections(operatorTurn(TurnKind.COMMAND)).added().text)
+            assertEquals(HookDecision.Continue, sections(testDelegatedTurn(operatorTurn())))
         }
 
         assertEquals(1, asked.size)
+    }
+
+    @Test
+    fun `a turn below the access level gets no section, and a heartbeat gets one only when everyone may`() {
+        catalogue("catalogue")
+
+        latticeHarness(config(SCENES_ON), opener).execute {
+            assertEquals(HookDecision.Continue, sections(testTurn()))
+            assertEquals(HookDecision.Continue, sections(testTurn(TurnKind.HEARTBEAT)))
+        }
+        assertTrue(asked.isEmpty())
+
+        latticeHarness(withAccess(EVERYONE, config(SCENES_ON)), opener).execute {
+            assertEquals("catalogue", sections(testTurn(TurnKind.HEARTBEAT)).added().text)
+            assertEquals("catalogue", sections(testTurn()).added().text)
+        }
     }
 
     @Test

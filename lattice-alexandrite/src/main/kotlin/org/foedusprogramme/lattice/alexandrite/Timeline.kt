@@ -22,7 +22,7 @@ import java.time.format.DateTimeParseException
 
 @Singleton
 @Contribute(Tool::class)
-internal class TimelineTool(private val graphs: LatticeGraphs) : Tool {
+internal class TimelineTool(private val graphs: LatticeGraphs, private val access: MemoryAccess) : Tool {
     override val definition: ToolDefinition = ToolDefinition(
         name = "lattice.timeline",
         description = "Shows this chat's history top-down, oldest first. With no arguments: its eras and periods " +
@@ -49,6 +49,7 @@ internal class TimelineTool(private val graphs: LatticeGraphs) : Tool {
     )
 
     override suspend fun execute(arguments: JsonObject, context: ToolContext): ToolResult {
+        if (!access.admits(context.turn)) return access.refusal("shown")
         val period = selector(arguments, "period") ?: return ToolResult(badSelector("period"), isError = true)
         val era = selector(arguments, "era") ?: return ToolResult(badSelector("era"), isError = true)
         if (period.isNotEmpty() && era.isNotEmpty()) {

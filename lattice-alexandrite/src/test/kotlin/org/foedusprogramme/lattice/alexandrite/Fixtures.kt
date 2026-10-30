@@ -10,6 +10,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import org.foedusprogramme.lattice.Lattice
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.LatticeSettings
@@ -29,6 +30,12 @@ import org.foedusprogramme.lattice.core.MemoryTexts
 import org.foedusprogramme.lattice.core.NoOpLatticeStore
 import org.unitedsoftware.alexandrite.sdk.AlexandriteSdk
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
+import org.unitedsoftware.alexandrite.sdk.chat.ChatAddress
+import org.unitedsoftware.alexandrite.sdk.chat.ChatUser
+import org.unitedsoftware.alexandrite.sdk.chat.ConversationId
+import org.unitedsoftware.alexandrite.sdk.chat.TurnId
+import org.unitedsoftware.alexandrite.sdk.chat.TurnInfo
+import org.unitedsoftware.alexandrite.sdk.chat.TurnKind
 import org.unitedsoftware.alexandrite.sdk.config.ConfigSectionSpec
 import org.unitedsoftware.alexandrite.sdk.di.container.Binding
 import org.unitedsoftware.alexandrite.sdk.di.container.instanceBinding
@@ -37,6 +44,9 @@ import org.unitedsoftware.alexandrite.sdk.plugin.PluginIds
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginIndex
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginInfo
 import org.unitedsoftware.alexandrite.testkit.PluginHarness
+import org.unitedsoftware.alexandrite.testkit.testChat
+import org.unitedsoftware.alexandrite.testkit.testTurn
+import org.unitedsoftware.alexandrite.testkit.testUser
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,6 +66,10 @@ internal fun config(extra: String): String {
     val more = Json.parseToJsonElement(extra) as JsonObject
     return JsonObject(base + more).toString()
 }
+
+/** The config [json] with `access` set to [level]. */
+internal fun withAccess(level: String, json: String = BASE_CONFIG): String =
+    JsonObject((Json.parseToJsonElement(json) as JsonObject) + ("access" to JsonPrimitive(level))).toString()
 
 /** A graph in memory that records what it is asked. */
 internal class FakeLattice(override val name: String) : Lattice {
@@ -200,6 +214,21 @@ internal fun latticeHarness(
 
 internal fun PluginHarness.execute(block: suspend PluginHarness.Running.() -> Unit) {
     runBlocking { withTimeout(30.seconds) { run(block) } }
+}
+
+/** An operator of the test chats. */
+internal val OPERATOR: ChatUser = testUser("owner", isOperator = true)
+
+/** [testTurn] whose actor is [OPERATOR]. */
+internal fun operatorTurn(
+    kind: TurnKind = TurnKind.MESSAGE,
+    chat: ChatAddress = testChat(),
+    id: TurnId = TurnId("test-turn"),
+    conversation: ConversationId = ConversationId("test"),
+    block: TurnInfo.Builder.() -> Unit = {},
+): TurnInfo = testTurn(kind, chat, id, conversation) {
+    actor(OPERATOR)
+    block()
 }
 
 internal fun hit(id: Long, content: String): RecallHit = RecallHit(id, content, 1.0, null, null, null, null, null)

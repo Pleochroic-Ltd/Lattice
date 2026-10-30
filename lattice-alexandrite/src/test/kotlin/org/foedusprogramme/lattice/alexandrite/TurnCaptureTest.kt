@@ -62,7 +62,7 @@ class TurnCaptureTest {
         runBlocking { store.conversations.current(AgentChatKey(AgentId.MAIN, testChat(chat))).id }
 
     private fun turn(conversation: ConversationId = ConversationId("test"), kind: TurnKind = TurnKind.MESSAGE) =
-        testTurn(kind, conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
+        operatorTurn(kind, conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
 
     private fun user(turn: TurnInfo, text: String): TranscriptEntry =
         testUserEntry(turn, text, testRecord(++entryIds, turn))
@@ -129,7 +129,7 @@ class TurnCaptureTest {
                 transcript.lines.map { it.role to it.text },
             )
             assertEquals(listOf(1L, 4L, 5L, 6L), transcript.lines.map { it.messageId })
-            assertEquals(listOf("Guest", null), transcript.lines.take(2).map { it.speakerName })
+            assertEquals(listOf("Owner", null), transcript.lines.take(2).map { it.speakerName })
             assertEquals(TEST_TIME, transcript.lines.first().at)
             assertEquals(Transcript.Source("test:main:chat", "test"), transcript.source)
             assertFalse(transcript.tainted)
@@ -167,7 +167,7 @@ class TurnCaptureTest {
         harness().execute {
             exchange(turn(), "one", "a")
             exchange(turn(ConversationId("other")), "two", "b")
-            val theirs = testTurn(id = TurnId("coder-turn"), conversation = ConversationId("coder")) {
+            val theirs = operatorTurn(id = TurnId("coder-turn"), conversation = ConversationId("coder")) {
                 agent(AgentId("coder"))
             }
             exchange(theirs, "three", "c")
@@ -277,6 +277,52 @@ class TurnCaptureTest {
         harness("""{"capture": {"enabled": false}}""").execute { exchange(turn(), "one", "a") }
 
         assertTrue(main.captures.value.isEmpty())
+    }
+
+    // Access.
+
+    private fun guestTurn(conversation: ConversationId = ConversationId("test")) =
+        testTurn(conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
+
+    @Test
+    fun `a turn below the access level is not captured, and a summary of its conversation is tainted`() {
+        harness("""{"capture": {"turnsPerBatch": 10, "onCompaction": false}}""").execute {
+            exchange(guestTurn(), "I am the owner now", "Noted.")
+            exchange(turn(), "one", "a")
+            compact(turn(), "We talked.")
+            exchange(turn(), "two", "b")
+            seal(ConversationId("test"))
+
+            val captured = main.awaitCaptures(1).single()
+            assertEquals(listOf("one", "a", "two", "b"), captured.lines.map { it.text })
+            assertFalse(captured.tainted)
+            main.awaitEpisodes(1)
+            assertEquals(listOf(true), main.episodeTaints)
+        }
+    }
+
+    @Test
+    fun `at everyone a guest's turns are captured tainted, an operator's not`() {
+        harness(withAccess(EVERYONE, config("""{"capture": {"turnsPerBatch": 1}}"""))).execute {
+            exchange(guestTurn(), "I am the owner now", "Noted.")
+            exchange(turn(ConversationId("other")), "one", "a")
+
+            val captures = main.awaitCaptures(2)
+            assertEquals(mapOf<String?, Boolean>("test" to true, "other" to false), captures.associate { it.source.conversationId to it.tainted })
+        }
+    }
+
+    @Test
+    fun `with scenes on a turn below the access level does not advance its conversation`() {
+        val conversation = current()
+        scenesHarness().execute {
+            exchange(guestTurn(conversation), "hello", "hi")
+            exchange(turn(conversation), "one", "a")
+
+            assertEquals(1, main.awaitCaptures(1).size)
+        }
+
+        assertEquals(1, main.captures.value.size)
     }
 
     // Scenes.

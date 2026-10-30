@@ -240,6 +240,7 @@ internal class AlexandriteConversationSource(
                     val address = sender.address.toString()
                     senders.saw(chatKey, address, sender.isOperator || sender.isTrusted)
                     val quoted = origin.quote?.trust?.content == false
+                    // Whatever anyone but an operator says is kept tainted, so it never comes back as trusted context.
                     ConversationMessage(
                         position,
                         ConversationMessage.Role.USER,
@@ -247,7 +248,7 @@ internal class AlexandriteConversationSource(
                         origin.receivedAt,
                         speakerName = sender.displayName,
                         senderId = address,
-                        tainted = tainted || origin.forwarded != null || quoted,
+                        tainted = tainted || origin.forwarded != null || quoted || taintsMemory(sender),
                     )
                 }
 
