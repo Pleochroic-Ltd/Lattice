@@ -207,19 +207,31 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
                 )
             },
             threads = rows("SELECT * FROM thread ORDER BY rowid") { rs ->
-                ThreadRecord(
-                    id = rs.getLong("id"),
-                    chatKey = rs.getString("chat_key"),
-                    description = rs.getString("description"),
-                    state = ThreadState.valueOf(rs.getString("state")),
-                    openedSceneId = rs.longOrNull("opened_scene_id"),
-                    closedSceneId = rs.longOrNull("closed_scene_id"),
-                    staleCount = rs.getInt("stale_count"),
-                    name = rs.getString("name"),
-                )
+                val state = runCatching { ThreadState.valueOf(rs.getString("state")) }.getOrNull()
+                if (state == null) {
+                    logger.warn("Skipped thread {}: unknown state {}; a newer Lattice wrote it.", rs.getLong("id"), rs.getString("state"))
+                    null
+                } else {
+                    ThreadRecord(
+                        id = rs.getLong("id"),
+                        chatKey = rs.getString("chat_key"),
+                        description = rs.getString("description"),
+                        state = state,
+                        openedSceneId = rs.longOrNull("opened_scene_id"),
+                        closedSceneId = rs.longOrNull("closed_scene_id"),
+                        staleCount = rs.getInt("stale_count"),
+                        name = rs.getString("name"),
+                    )
+                }
             },
             threadLinks = rows("SELECT thread_id, engram_id, role FROM thread_link ORDER BY rowid") { rs ->
-                ThreadLinkRecord(rs.getLong(1), rs.getLong(2), ThreadRole.valueOf(rs.getString(3)))
+                val role = runCatching { ThreadRole.valueOf(rs.getString(3)) }.getOrNull()
+                if (role == null) {
+                    logger.warn("Skipped a link of thread {}: unknown role {}; a newer Lattice wrote it.", rs.getLong(1), rs.getString(3))
+                    null
+                } else {
+                    ThreadLinkRecord(rs.getLong(1), rs.getLong(2), role)
+                }
             },
             periods = rows("SELECT * FROM period ORDER BY rowid") { rs ->
                 PeriodRecord(
@@ -285,17 +297,31 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
         )
     }
 
+    /**
+     * An engram row. Every other table points at engrams, so a value this Lattice doesn't know (a newer one wrote it)
+     * keeps the row: an unknown layer reads as SEMANTIC, an unknown speaker as none (like an unknown origin).
+     */
     private fun engramOf(rs: ResultSet): Engram = Engram(
         id = rs.getLong("id"),
         content = rs.getString("content"),
         embedding = rs.getBytes("embedding").toFloatArray(),
         salience = rs.getDouble("salience"),
-        layer = Engram.Layer.valueOf(rs.getString("layer")),
+        layer = rs.getString("layer").let { name ->
+            runCatching { Engram.Layer.valueOf(name) }.getOrElse {
+                logger.warn("Engram {} has an unknown layer {}; read as SEMANTIC.", rs.getLong("id"), name)
+                Engram.Layer.SEMANTIC
+            }
+        },
         createdAt = Instant.parse(rs.getString("created_at")),
         lastActivatedAt = Instant.parse(rs.getString("last_activated_at")),
         activationCount = rs.getInt("activation_count"),
         softReplays = rs.getInt("soft_replays"),
-        speaker = rs.getString("speaker")?.let { Speaker.valueOf(it) },
+        speaker = rs.getString("speaker")?.let { name ->
+            runCatching { Speaker.valueOf(name) }.getOrElse {
+                logger.warn("Engram {} has an unknown speaker {}; read as none.", rs.getLong("id"), name)
+                null
+            }
+        },
         sourceMessageId = rs.longOrNull("source_message_id"),
         isEpisode = rs.getInt("is_episode") == 1,
         supersededBy = rs.longOrNull("superseded_by"),

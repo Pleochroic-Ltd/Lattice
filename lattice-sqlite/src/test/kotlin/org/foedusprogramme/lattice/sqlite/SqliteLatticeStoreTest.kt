@@ -2,9 +2,14 @@ package org.foedusprogramme.lattice.sqlite
 
 import org.foedusprogramme.lattice.core.EdgeRecord
 import org.foedusprogramme.lattice.core.Edge
+import org.foedusprogramme.lattice.core.Engram
 import org.foedusprogramme.lattice.core.LatticeStore
 import org.foedusprogramme.lattice.core.LatticeStoreContract
 import org.foedusprogramme.lattice.core.LatticeStoreContract.Fixtures.engram
+import org.foedusprogramme.lattice.core.Speaker
+import org.foedusprogramme.lattice.core.ThreadLinkRecord
+import org.foedusprogramme.lattice.core.ThreadRecord
+import org.foedusprogramme.lattice.core.ThreadRole
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
@@ -14,6 +19,7 @@ import java.sql.DriverManager
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SqliteLatticeStoreContractTest : LatticeStoreContract() {
@@ -123,6 +129,34 @@ class SqliteLatticeStoreTest {
             }
             store.putEngram(engram(3))
             assertEquals(listOf(1L, 3L), store.load().engrams.map { it.id })
+        }
+    }
+
+    @Test
+    fun `values a newer Lattice wrote never fail the load`() {
+        val path = dir.resolve("graph.db")
+        SqliteLatticeStore(path).use { store ->
+            store.putEngram(engram(1).copy(speaker = Speaker.USER))
+            store.putEngram(engram(2))
+            store.putThread(ThreadRecord(10, "chat-1", "a promise"))
+            store.putThread(ThreadRecord(11, "chat-1", "a plan"))
+            store.putThreadLink(ThreadLinkRecord(10, 1, ThreadRole.SETUP))
+            store.putThreadLink(ThreadLinkRecord(10, 2, ThreadRole.SETUP))
+        }
+        DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
+            c.createStatement().use { s ->
+                s.execute("UPDATE engram SET layer = 'DREAM', speaker = 'NARRATOR' WHERE id = 1")
+                s.execute("UPDATE thread SET state = 'PAUSED' WHERE id = 11")
+                s.execute("UPDATE thread_link SET role = 'ECHO' WHERE engram_id = 2")
+            }
+        }
+        SqliteLatticeStore(path).use { store ->
+            val loaded = store.load()
+            val e = loaded.engrams.single { it.id == 1L }
+            assertEquals(Engram.Layer.SEMANTIC, e.layer)
+            assertNull(e.speaker)
+            assertEquals(listOf(10L), loaded.threads.map { it.id }, "the thread in an unknown state is skipped")
+            assertEquals(listOf(1L), loaded.threadLinks.map { it.engramId }, "the link with an unknown role is skipped")
         }
     }
 
