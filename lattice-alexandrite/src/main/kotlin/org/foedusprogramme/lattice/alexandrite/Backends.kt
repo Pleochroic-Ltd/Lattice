@@ -24,10 +24,12 @@ import org.unitedsoftware.alexandrite.sdk.transcript.EndpointId
 import org.unitedsoftware.alexandrite.sdk.transcript.ModelRef
 import java.nio.file.Files
 import java.nio.file.Path
+import java.time.Duration
 import java.time.Clock
 import kotlin.io.path.isDirectory
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
+import kotlin.time.toJavaDuration
 
 /** What each agent's graph runs on. */
 internal interface BackendFactory : AutoCloseable {
@@ -62,7 +64,7 @@ internal class Backends(
         AlexandriteMemoryModel(
             { endpoints[it] },
             { task -> ModelRef.parse(model.modelOf(task)) },
-            model.maxOutputTokens,
+            model.hostMaxOutputTokens,
             model.timeout,
         )
     }
@@ -142,8 +144,8 @@ internal class Backends(
 
     private fun model(model: ModelConfig): MemoryModel? = when (model.kind) {
         HOST -> hostModel
-        OPENAI -> openAiModel(model.baseUrl!!, model.apiKey, model.default!!, MemoryTask.entries.associateWith(model::modelOf))
-        PLEOCHROIC -> pleochroicModel()
+        OPENAI -> openAiModel(openAiModelConfig(model))
+        PLEOCHROIC -> pleochroicModel(pleochroicModelClient())
         else -> null
     }
 
@@ -155,10 +157,20 @@ internal class Backends(
         }
     }
 
-    private val pleochroicClient: PleochroicClient by lazy {
+    private val pleochroicClient: PleochroicClient by lazy { pleochroicClient(null) }
+
+    private fun pleochroicClient(requestTimeout: Duration?): PleochroicClient {
         val account = config.pleochroic!!
-        PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, clientName = "lattice-alexandrite")
+        return if (requestTimeout == null) {
+            PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, clientName = CLIENT_NAME)
+        } else {
+            PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, requestTimeout = requestTimeout, clientName = CLIENT_NAME)
+        }
     }
+
+    /** The client of Pleochroic's model calls: the shared one, or one that waits `model.timeoutSeconds` for an answer. */
+    internal fun pleochroicModelClient(): PleochroicClient =
+        config.modelConfig.timeoutSeconds?.let { pleochroicClient(Duration.ofSeconds(it.toLong())) } ?: pleochroicClient
 
     private fun sqliteStore(path: Path): LatticeStore = SqliteLatticeStore(path)
 
@@ -171,17 +183,25 @@ internal class Backends(
 
     private fun pleochroicEmbedder(): Embedder = PleochroicEmbedder(pleochroicClient)
 
-    private fun openAiModel(baseUrl: String, apiKey: Secret?, default: String, models: Map<MemoryTask, String>): MemoryModel =
-        OpenAiChatMemoryModel(
-            OpenAiChatMemoryModel.Config(baseUrl, default, models, apiKey?.reveal()),
-        )
+    private fun openAiModel(config: OpenAiChatMemoryModel.Config): MemoryModel = OpenAiChatMemoryModel(config)
 
-    private fun pleochroicModel(): MemoryModel = PleochroicMemoryModel(pleochroicClient)
+    private fun pleochroicModel(client: PleochroicClient): MemoryModel = PleochroicMemoryModel(client)
 
     private fun texts(): MemoryTexts = BundledTexts
 
     private companion object {
+        const val CLIENT_NAME = "lattice-alexandrite"
         const val GRAPHS = "graphs"
         const val PLEOCHROIC_STATE = "pleochroic"
     }
 }
+
+/** An `openai` model's settings: its models per task, its output limit and how long a call may take. */
+internal fun openAiModelConfig(model: ModelConfig): OpenAiChatMemoryModel.Config = OpenAiChatMemoryModel.Config(
+    baseUrl = model.baseUrl!!,
+    defaultModel = model.default!!,
+    models = MemoryTask.entries.associateWith(model::modelOf),
+    apiKey = model.apiKey?.reveal(),
+    maxTokens = model.maxOutputTokens,
+    requestTimeout = model.timeout.toJavaDuration(),
+)

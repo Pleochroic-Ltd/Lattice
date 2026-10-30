@@ -188,6 +188,39 @@ class LatticeConfigTest {
     }
 
     @Test
+    fun `a model's output limit and timeout reach the backends that take them and are refused by the others`() {
+        val openai = """"kind": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "default": "m""""
+        val bounded = openAiModelConfig(decode(config("""{"model": {$openai, "maxOutputTokens": 2000, "timeoutSeconds": 30}}""")).modelConfig)
+        assertEquals(2000, bounded.maxTokens)
+        assertEquals(java.time.Duration.ofSeconds(30), bounded.requestTimeout)
+        val unbounded = openAiModelConfig(decode(config("""{"model": {$openai}}""")).modelConfig)
+        assertNull(unbounded.maxTokens)
+        assertEquals(java.time.Duration.ofSeconds(300), unbounded.requestTimeout)
+
+        val host = decode(config("""{"model": {"kind": "host", "default": "a/b"}}""")).modelConfig
+        assertEquals(8192, host.hostMaxOutputTokens)
+        assertEquals(180.seconds, host.timeout)
+
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        assertContains(
+            refused(config("""{"model": {"kind": "pleochroic", "maxOutputTokens": 2000}, $pleochroic}""")),
+            "model.maxOutputTokens is not read when model.kind is \"pleochroic\"",
+        )
+        assertContains(
+            refused(config("""{"model": {"kind": "none", "timeoutSeconds": 30}}""")),
+            "model.timeoutSeconds is not read when model.kind is \"none\"",
+        )
+        fun client(model: String) = Backends(
+            decode(config("""{"model": $model, $pleochroic}""")),
+            java.nio.file.Files.createTempDirectory("lattice-model"),
+            emptyList(),
+            java.time.Clock.systemUTC(),
+        ).pleochroicModelClient()
+        assertEquals(java.time.Duration.ofSeconds(90), client("""{"kind": "pleochroic", "timeoutSeconds": 90}""").requestTimeout)
+        assertEquals(java.time.Duration.ofSeconds(60), client("""{"kind": "pleochroic"}""").requestTimeout)
+    }
+
+    @Test
     fun `pleochroic is required exactly when something uses it`() {
         assertContains(
             refused(config("""{"storage": {"kind": "pleochroic"}}""")),

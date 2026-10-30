@@ -214,8 +214,10 @@ internal class ModelConfig(
     val tasks: Map<String, String> = emptyMap(),
     val baseUrl: String? = null,
     val apiKey: Secret? = null,
-    val maxOutputTokens: Int = 8192,
-    val timeoutSeconds: Int = 180,
+    /** The most tokens a call may write: 8192 for a host model when null, the server's limit for an `openai` one. */
+    val maxOutputTokens: Int? = null,
+    /** How long a call may take: 180 s for a host model when null, 300 s for an `openai` one, 60 s for Pleochroic. */
+    val timeoutSeconds: Int? = null,
 ) {
     fun check() {
         when (kind) {
@@ -244,19 +246,39 @@ internal class ModelConfig(
                 }
             }
 
-            PLEOCHROIC, NONE -> require(default == null && tasks.isEmpty() && baseUrl == null && apiKey == null) {
-                "model.default, tasks, baseUrl and apiKey are not read when model.kind is \"$kind\": remove them."
+            PLEOCHROIC, NONE -> {
+                require(default == null && tasks.isEmpty() && baseUrl == null && apiKey == null) {
+                    "model.default, tasks, baseUrl and apiKey are not read when model.kind is \"$kind\": remove them."
+                }
+                require(maxOutputTokens == null) {
+                    "model.maxOutputTokens is not read when model.kind is \"$kind\": remove it" +
+                        if (kind == PLEOCHROIC) ", since Pleochroic sets each task's output budget." else "."
+                }
+                require(kind != NONE || timeoutSeconds == null) {
+                    "model.timeoutSeconds is not read when model.kind is \"none\": remove it."
+                }
             }
 
             else -> throw IllegalArgumentException(
                 "model.kind must be \"host\", \"openai\", \"pleochroic\" or \"none\".",
             )
         }
-        require(maxOutputTokens in 256..1_000_000) { "model.maxOutputTokens must be between 256 and 1000000." }
-        require(timeoutSeconds in 5..3600) { "model.timeoutSeconds must be between 5 and 3600." }
+        require(maxOutputTokens == null || maxOutputTokens in 256..1_000_000) {
+            "model.maxOutputTokens must be between 256 and 1000000."
+        }
+        require(timeoutSeconds == null || timeoutSeconds in 5..3600) { "model.timeoutSeconds must be between 5 and 3600." }
     }
 
-    val timeout: Duration get() = timeoutSeconds.seconds
+    /** The most tokens a host model's call may write. */
+    val hostMaxOutputTokens: Int get() = maxOutputTokens ?: DEFAULT_HOST_OUTPUT_TOKENS
+
+    /** How long a call may take. */
+    val timeout: Duration
+        get() = timeoutSeconds?.seconds ?: when (kind) {
+            HOST -> DEFAULT_HOST_TIMEOUT
+            OPENAI -> DEFAULT_OPENAI_TIMEOUT
+            else -> DEFAULT_PLEOCHROIC_TIMEOUT
+        }
 
     /** The model that [task] runs on. */
     fun modelOf(task: MemoryTask): String = tasks[task.wire] ?: default!!
@@ -486,6 +508,10 @@ private const val MAX_SEGMENT = 1000
 private const val MAX_LOOKAHEAD = 200
 private const val MIN_WINDOW = 10
 private const val MAX_DRAIN_SECONDS = 60
+private const val DEFAULT_HOST_OUTPUT_TOKENS = 8192
+private val DEFAULT_HOST_TIMEOUT = 180.seconds
+private val DEFAULT_OPENAI_TIMEOUT = 300.seconds
+private val DEFAULT_PLEOCHROIC_TIMEOUT = 60.seconds
 private const val DEFAULT_PULL_SECONDS = 300
 private const val MIN_PULL_SECONDS = 10
 private const val MAX_PULL_SECONDS = 86_400

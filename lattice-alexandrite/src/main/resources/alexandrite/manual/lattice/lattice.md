@@ -83,7 +83,9 @@ Lattice reads `plugins.lattice`:
 - `model.kind`: `host` for one of the host's model endpoints (`default` as `<endpoint>/<model>`, and `tasks` to give a
   task its own model), `openai` for an OpenAI-compatible chat API (`baseUrl`, `apiKey`, `default`, `tasks`), `pleochroic`,
   or `none` to keep memories without extracting any. The tasks are `extract`, `judge`, `abstract`, `entities`,
-  `narrate`, `scenes` and `periods`. `maxOutputTokens` and `timeoutSeconds` bound each call.
+  `narrate`, `scenes` and `periods`. `maxOutputTokens` bounds what a `host` call (8192 by default) or an `openai` call
+  (the server's own limit by default) writes; Pleochroic sets it per task itself. `timeoutSeconds` bounds how long a call
+  waits: 180 seconds by default for `host`, 300 for `openai` and 60 for `pleochroic`.
 - `pleochroic.baseUrl`, `pleochroic.apiKey`: the account that every `pleochroic` part uses.
 - `recall`: `enabled`, `limit` (memories per turn), `language` (of the block's markers and the period catalogue),
   `timeoutMillis` (also bounds reading the catalogue), `fallback` (`drop` or `bake`: whether an endpoint that cannot
