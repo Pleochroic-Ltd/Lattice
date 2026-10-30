@@ -2,6 +2,7 @@
 
 package org.foedusprogramme.lattice.alexandrite
 
+import kotlinx.coroutines.runBlocking
 import org.foedusprogramme.lattice.Transcript
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
 import org.unitedsoftware.alexandrite.sdk.chat.AgentChatKey
@@ -34,6 +35,8 @@ import org.unitedsoftware.alexandrite.testkit.testDelegatedTurn
 import org.unitedsoftware.alexandrite.testkit.testRecord
 import org.unitedsoftware.alexandrite.testkit.testTurn
 import org.unitedsoftware.alexandrite.testkit.testUserEntry
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Instant
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -48,6 +51,15 @@ class TurnCaptureTest {
 
     private fun harness(extra: String = """{"capture": {"turnsPerBatch": 2}}""", bindStore: Boolean = true) =
         latticeHarness(config(extra), opener) { if (bindStore) store(store) }
+
+    private fun scenesHarness(dataRoot: Path? = null, bindStore: Boolean = true) =
+        latticeHarness(config(SCENES_ON), opener) {
+            if (bindStore) store(store)
+            dataRoot?.let(::dataRoot)
+        }
+
+    private fun current(chat: String = "chat"): ConversationId =
+        runBlocking { store.conversations.current(AgentChatKey(AgentId.MAIN, testChat(chat))).id }
 
     private fun turn(conversation: ConversationId = ConversationId("test"), kind: TurnKind = TurnKind.MESSAGE) =
         testTurn(kind, conversation = conversation, id = TurnId("turn-${entryIds + 1}"))
@@ -223,5 +235,68 @@ class TurnCaptureTest {
         harness("""{"capture": {"enabled": false}}""").execute { exchange(turn(), "one", "a") }
 
         assertTrue(main.captures.value.isEmpty())
+    }
+
+    // Scenes.
+
+    @Test
+    fun `with scenes on each message turn advances its conversation unbatched, and a seal finishes it`() {
+        val conversation = current()
+        scenesHarness().execute {
+            exchange(turn(conversation), "one", "a")
+            exchange(turn(conversation), "two", "b")
+
+            val captures = main.awaitCaptures(2)
+            assertEquals(List(2) { Transcript.Source("test:main:chat", conversation.value) }, captures.map { it.source })
+            assertTrue(captures.all { it.lines.isEmpty() }, "the graph reads the messages back from the store")
+
+            seal(conversation)
+            assertEquals(listOf(conversation.value), main.awaitSealed(1))
+        }
+    }
+
+    @Test
+    fun `heartbeats, sub-agent runs and unknown conversations stay out of a chat's scenes`() {
+        val conversation = current()
+        val heartbeat = runBlocking { store.conversations.heartbeatBase(AgentChatKey(AgentId.MAIN, testChat())).id }
+        scenesHarness().execute {
+            exchange(turn(conversation, kind = TurnKind.HEARTBEAT), "beat", "nothing to do")
+            exchange(turn(heartbeat), "beat", "nothing to do")
+            exchange(testDelegatedTurn(), "task", "done")
+            exchange(turn(ConversationId("unknown")), "lost", "indeed")
+            seal(heartbeat)
+            exchange(turn(conversation), "one", "a")
+
+            assertEquals(listOf(conversation.value), main.awaitCaptures(1).map { it.source.conversationId })
+            val registry = get<SceneHost>().registry
+            assertEquals(listOf("test:main:chat"), registry.chats(AgentId.MAIN))
+            assertEquals(listOf(conversation.value), registry.conversations(AgentId.MAIN, "test:main:chat"))
+        }
+
+        assertEquals(1, main.captures.value.size)
+        assertTrue(main.sealed.value.isEmpty())
+    }
+
+    @Test
+    fun `the conversations seen are kept across a restart`() {
+        val root = Files.createTempDirectory("lattice-capture")
+        val conversation = current()
+        scenesHarness(root).execute {
+            exchange(turn(conversation), "one", "a")
+            main.awaitCaptures(1)
+        }
+
+        scenesHarness(root).execute {
+            assertEquals(listOf(conversation.value), get<SceneHost>().registry.conversations(AgentId.MAIN, "test:main:chat"))
+        }
+    }
+
+    @Test
+    fun `with scenes on but no store bound, turns are batched as before`() {
+        scenesHarness(bindStore = false).execute {
+            repeat(4) { exchange(turn(), "said $it", "answered $it") }
+
+            assertEquals(8, main.awaitCaptures(1).single().lines.size)
+        }
     }
 }

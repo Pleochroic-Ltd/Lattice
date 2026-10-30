@@ -31,12 +31,16 @@ import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
 /**
  * Batches the words of committed message turns per conversation and captures each batch into its agent's graph, every
  * few turns and at each compaction and seal, on one worker that takes the events in the order they happened.
+ *
+ * With scenes on, nothing is batched: each committed message turn tells its graph that the conversation has new
+ * messages, which the graph reads back from the host's stores, and each seal tells it the conversation is finished.
  */
 @Singleton
 internal class TurnCapture(
     config: LatticeConfig,
     private val graphs: LatticeGraphs,
     private val taints: TurnTaints,
+    private val scenes: SceneHost,
     private val scope: PluginScope,
 ) : Lifecycle {
     private val config = config.capture
@@ -66,6 +70,10 @@ internal class TurnCapture(
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
         if (!config.enabled || !turn.remembers()) return
+        if (scenes.live) {
+            offer(Event.Advanced(turn))
+            return
+        }
         val lines = lines(entries)
         if (lines.isEmpty()) return
         offer(Event.Committed(turn, lines, taints.tainted(turn)))
@@ -101,13 +109,15 @@ internal class TurnCapture(
                 if (batch.turns >= config.turnsPerBatch) flush(conversation)
             }
 
+            is Event.Advanced -> advance(event.turn)
+
             is Event.Compacted -> {
                 summaries[conversation] = event.summary
                 if (config.onCompaction) flush(conversation)
             }
 
             is Event.Sealed -> {
-                if (config.onSeal) flush(event.sealed)
+                if (scenes.live) seal(event.turn, event.sealed) else if (config.onSeal) flush(event.sealed)
                 val summary = summaries.remove(event.sealed)
                 if (summary != null && config.episodes) saveEpisode(event.turn, event.sealed, summary)
             }
@@ -130,6 +140,32 @@ internal class TurnCapture(
                 batch.agent,
                 e,
             )
+        }
+    }
+
+    /** Tells the graph of [turn]'s conversation that it has new messages, under the chat it belongs to. */
+    private suspend fun advance(turn: TurnInfo) {
+        val conversation = turn.conversation
+        try {
+            val registered = scenes.register(conversation) ?: return
+            val source = Transcript.Source(chatKey = registered.chat, conversationId = conversation.value)
+            graphs.graph(AgentId(registered.agent)).capture(Transcript(emptyList(), source))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.warn("Capturing the scenes of conversation {} of agent '{}' failed", conversation, turn.agent, e)
+        }
+    }
+
+    /** Tells the graph of the sealed [conversation] that it takes no more messages. */
+    private suspend fun seal(turn: TurnInfo, conversation: ConversationId) {
+        try {
+            val registered = scenes.register(conversation) ?: return
+            graphs.graph(AgentId(registered.agent)).conversationSealed(conversation.value)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            logger.warn("Finishing the scenes of conversation {} of agent '{}' failed", conversation, turn.agent, e)
         }
     }
 
@@ -156,6 +192,8 @@ internal class TurnCapture(
         val turn: TurnInfo
 
         class Committed(override val turn: TurnInfo, val lines: List<Transcript.Line>, val tainted: Boolean) : Event
+
+        class Advanced(override val turn: TurnInfo) : Event
 
         class Compacted(override val turn: TurnInfo, val summary: String) : Event
 
