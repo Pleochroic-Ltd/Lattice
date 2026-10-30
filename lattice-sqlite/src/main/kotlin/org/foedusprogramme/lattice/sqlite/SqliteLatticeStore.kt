@@ -57,6 +57,9 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
     private val connection: Connection
     private val statements = HashMap<String, PreparedStatement>()
     private var depth = 0
+
+    /** The transaction was rolled back under open savepoints: refused until the outermost one ends. */
+    private var aborted = false
     private var closed = false
 
     @Volatile
@@ -610,6 +613,7 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
     /** Runs [block] in a transaction, or a savepoint inside one: all of it lands or, on a throw, none. */
     private fun <T> tx(block: () -> T): T = lock.withLock {
         check(!closed) { "This Lattice store is closed; open the graph again." }
+        check(!aborted) { "This Lattice store's transaction was rolled back by a failed write; the batch can't go on." }
         val savepoint = "s$depth"
         connection.createStatement().use { it.execute("SAVEPOINT $savepoint") }
         depth++
@@ -617,17 +621,38 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
             block()
         } catch (t: Throwable) {
             depth--
-            runCatching {
-                connection.createStatement().use {
-                    it.execute("ROLLBACK TO $savepoint")
-                    it.execute("RELEASE $savepoint")
+            if (!aborted) {
+                runCatching {
+                    connection.createStatement().use {
+                        it.execute("ROLLBACK TO $savepoint")
+                        it.execute("RELEASE $savepoint")
+                    }
+                }.onFailure {
+                    t.addSuppressed(it)
+                    abort()
                 }
-            }.onFailure { t.addSuppressed(it) }
+            }
+            if (depth == 0) aborted = false
             throw t
         }
         depth--
-        connection.createStatement().use { it.execute("RELEASE $savepoint") }
+        try {
+            check(!aborted) { "This Lattice store's transaction was rolled back by a failed write; nothing of the batch landed." }
+            // The outermost RELEASE commits; when it fails (a deferred constraint, a busy or full disk) SQLite keeps
+            // the transaction open, and every later write would nest in it and never commit.
+            connection.createStatement().use { it.execute("RELEASE $savepoint") }
+        } catch (t: Throwable) {
+            if (!aborted) abort()
+            if (depth == 0) aborted = false
+            throw t
+        }
         result
+    }
+
+    /** Rolls the whole transaction back (ignoring a failure: there may be none left); the open savepoints are void. */
+    private fun abort() {
+        runCatching { connection.createStatement().use { it.execute("ROLLBACK") } }
+        aborted = depth > 0
     }
 
     private fun statement(sql: String): PreparedStatement =

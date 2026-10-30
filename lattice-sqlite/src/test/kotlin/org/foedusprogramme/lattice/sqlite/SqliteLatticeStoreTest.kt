@@ -90,6 +90,46 @@ class SqliteLatticeStoreTest {
     }
 
     @Test
+    fun `a batch whose commit fails is rolled back and later writes commit`() {
+        val path = dir.resolve("graph.db")
+        SqliteLatticeStore(path).use { store ->
+            store.putEngram(engram(1))
+            // A deferred foreign key fails the outermost RELEASE (the commit), not the write.
+            assertFailsWith<java.sql.SQLException> {
+                store.batch { s ->
+                    connectionOf(store).createStatement().use { it.execute("PRAGMA defer_foreign_keys = ON") }
+                    s.putEdge(EdgeRecord(1, 99, Edge.Type.SEMANTIC, 0.5, LatticeStoreContract.T0))
+                    s.putEngram(engram(2))
+                }
+            }
+            store.putEngram(engram(3))
+            SqliteLatticeStore(path).use { other ->
+                val loaded = other.load()
+                assertEquals(listOf(1L, 3L), loaded.engrams.map { it.id }, "the failed batch left nothing, the next write committed")
+                assertTrue(loaded.edges.isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `a nested batch that fails inside another rolls the whole batch back`() {
+        SqliteLatticeStore(dir.resolve("graph.db")).use { store ->
+            store.putEngram(engram(1))
+            assertFailsWith<java.sql.SQLException> {
+                store.batch { s ->
+                    s.putEngram(engram(2))
+                    s.batch { inner -> inner.putEdge(EdgeRecord(1, 99, Edge.Type.SEMANTIC, 0.5, LatticeStoreContract.T0)) }
+                }
+            }
+            store.putEngram(engram(3))
+            assertEquals(listOf(1L, 3L), store.load().engrams.map { it.id })
+        }
+    }
+
+    private fun connectionOf(store: SqliteLatticeStore): java.sql.Connection =
+        SqliteLatticeStore::class.java.getDeclaredField("connection").apply { isAccessible = true }.get(store) as java.sql.Connection
+
+    @Test
     fun `a closed store refuses calls`() {
         val store = SqliteLatticeStore(dir.resolve("graph.db"))
         store.close()
