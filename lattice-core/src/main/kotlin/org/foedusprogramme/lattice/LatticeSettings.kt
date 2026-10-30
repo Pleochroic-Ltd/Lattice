@@ -19,8 +19,6 @@ import kotlin.time.Duration.Companion.seconds
 data class LatticeSettings(
     /** The user's name, so extraction writes "Alice likes tea" rather than "the user likes tea"; null = "the user". */
     val userName: String? = null,
-    /** Names the user also goes by, folded into one entity. */
-    val entitySelfAliases: Set<String> = emptySet(),
     /**
      * The names the assistant goes by in the conversation. Extraction writes the assistant's own memories in the first
      * person under them ("I cried", not "Mia cried"), and entity resolution never admits them as entities.

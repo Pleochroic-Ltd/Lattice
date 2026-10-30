@@ -25,7 +25,7 @@ internal class LatticeConfig(
     /** The user's name in memories, "the user" when null. */
     val userName: String? = null,
     /** Names the user also goes by. */
-    val selfAliases: List<String> = emptyList(),
+    val assistantNames: List<String> = emptyList(),
     /** The zone of dates in memories and of the sleep time, the host's when null. */
     val zone: String? = null,
     val storage: StorageConfig = StorageConfig(),
@@ -42,7 +42,7 @@ internal class LatticeConfig(
         require(userName == null || userName.isNotBlank()) {
             "userName may not be blank: write the user's name, or remove it to call them \"the user\"."
         }
-        require(selfAliases.none { it.isBlank() }) { "selfAliases may not hold a blank name: remove it." }
+        require(assistantNames.none { it.isBlank() }) { "assistantNames may not hold a blank name: remove it." }
         zone?.let { zoneOf("zone", it) }
         storage.check()
         requireNotNull(embedder) {
@@ -84,7 +84,7 @@ internal class LatticeConfig(
 
     fun settings(hostZone: ZoneId): LatticeSettings = LatticeSettings(
         userName = userName,
-        entitySelfAliases = selfAliases.toSet(),
+        assistantNames = assistantNames.toSet(),
         zone = zone(hostZone),
         language = Language(recall.language),
         retrievalLimit = recall.limit,

@@ -196,7 +196,7 @@ internal class DefaultLattice(
             else -> RecallDating.turnEnd(options.chatKey, now(), zone)
         }
         onGraphBounded { g ->
-            val hits = dispatchTemporal(g, cue, options.limit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
+            val hits = dispatchTemporal(g, cue, options.limit ?: settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
             val text = RecallFormatter.format(hits, markers, g.temporalLayerEnabled, lookup(g, language), settings.userName, dating)
             val tainted = hits.any { h -> h.engram.tainted || g.evidenceQuotes(h.engram.id).any { it.tainted } }
             Recall(text, hits.map(::recallHit), tainted)

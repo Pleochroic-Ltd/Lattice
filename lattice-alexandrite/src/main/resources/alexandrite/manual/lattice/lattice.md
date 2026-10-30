@@ -35,7 +35,9 @@ starts a sleep now.
 
 Lattice reads `plugins.lattice`:
 
-- `userName`, `selfAliases`: the user's name in memories and the names they also go by; "the user" when unset.
+- `userName`: the user's name in memories; "the user" when unset.
+- `assistantNames`: the names the assistant goes by in conversation, so its own memories are written in the first person
+  and never become entities.
 - `zone`: the zone of dates in memories and of the sleep time, the host's when unset.
 - `storage.kind`: `local` keeps each agent's graph in a SQLite file in the plugin's data directory; `pleochroic` keeps
   it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>`.

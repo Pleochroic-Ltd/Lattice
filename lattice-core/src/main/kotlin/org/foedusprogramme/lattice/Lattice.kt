@@ -56,7 +56,8 @@ interface Lattice {
 class GraphBusyException(message: String) : RuntimeException(message)
 
 data class RecallOptions(
-    val limit: Int = 6,
+    /** Most memories to bring back; null = [LatticeSettings.retrievalLimit]. */
+    val limit: Int? = null,
     val reinforce: Reinforce = Reinforce.SOFT,
     /**
      * An explicit search (a tool call) rather than the automatic per-turn recall: no emit gate, aggregative questions

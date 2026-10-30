@@ -33,7 +33,7 @@ class LatticeConfigTest {
             """
             {
               "userName": "Alice",
-              "selfAliases": ["Ali"],
+              "assistantNames": ["Ali"],
               "zone": "Asia/Shanghai",
               "storage": {"kind": "pleochroic", "graphPrefix": "home-"},
               "embedder": {"kind": "pleochroic"},
@@ -50,7 +50,7 @@ class LatticeConfigTest {
         val settings = config.settings(ZoneOffset.UTC)
 
         assertEquals("Alice", settings.userName)
-        assertEquals(setOf("Ali"), settings.entitySelfAliases)
+        assertEquals(setOf("Ali"), settings.assistantNames)
         assertEquals(ZoneId.of("Asia/Shanghai"), settings.zone)
         assertEquals(Language.ZH, settings.language)
         assertEquals(8, settings.retrievalLimit)
