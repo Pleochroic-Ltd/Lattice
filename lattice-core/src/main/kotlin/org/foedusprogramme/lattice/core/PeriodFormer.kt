@@ -435,10 +435,15 @@ class PeriodFormer(
         )
     }
 
-    /** A message a person wrote: a USER message with text — not the host's own text, not a tool result. */
-    private fun hasPersonMessage(scene: SceneRecord): Boolean =
-        source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
-            .any { it.role == ConversationMessage.Role.USER && it.text.isNotBlank() }
+    /**
+     * A message a person wrote: a USER message with text — not the host's own text, not a tool result. A scene none of
+     * whose messages read back (another device's conversation) is not this device's to exclude: it counts as having one,
+     * and its trust leaves it untrusted.
+     */
+    private fun hasPersonMessage(scene: SceneRecord): Boolean {
+        val messages = source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
+        return messages.isEmpty() || messages.any { it.role == ConversationMessage.Role.USER && it.text.isNotBlank() }
+    }
 
     /** Where the pending scenes go: deterministic placements, the formation input, re-opened fallback periods. */
     private class Plan(

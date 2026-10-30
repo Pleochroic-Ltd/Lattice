@@ -913,6 +913,26 @@ class PeriodFormerTest {
     }
 
     @Test
+    fun `another device's scene is neither excluded nor shown, and names no period`() {
+        val r = PeriodRig()
+        val talk = r.scene("真正的聊天")
+        val foreign = r.scene("别的设备的秘密", date = day("2026-07-23"))
+        r.source.forget(foreign.conversationId)
+        val talk2 = r.scene("又一次聊天", date = day("2026-07-24"))
+
+        assertEquals(Outcome.FORMED, r.former().formChat(CHAT))
+
+        val prompt = r.formation.calls.single()
+        assertEquals(3, FormationModel.newScenes(prompt))
+        assertFalse("别的设备的秘密" in prompt, prompt)
+        assertTrue(r.g { g -> g.periodExclusions(CHAT).isEmpty() }, "this device does not exclude what it cannot read")
+        val (period, members) = r.periods().single()
+        assertEquals(ids(talk, foreign, talk2), members)
+        assertFalse(foreign.sceneId in period.namingSceneIds)
+        assertEquals(false, r.g { it.sceneTrust(foreign.sceneId) })
+    }
+
+    @Test
     fun `a scene the pipeline did not write counts as ended`() {
         val r = PeriodRig()
         val s = r.scene("有状态的场景")

@@ -217,7 +217,8 @@ internal class SceneHubNarration(
                 // is not worth an embedding.
                 val text = result.narration.trim()
                 val vector = if (EpisodeNarrator.withinNarrationBand(text)) embedder.embed(text) else null
-                val tainted = messages.any { it.tainted }
+                // Messages that do not read back vouch for nothing: the hub is tainted.
+                val tainted = messages.isEmpty() || messages.any { it.tainted }
                 graph.withGraph { g ->
                     val record = (g.scene(scene.sceneId) ?: scene).copy(inProgress = inProgress)
                     if (vector != null) {

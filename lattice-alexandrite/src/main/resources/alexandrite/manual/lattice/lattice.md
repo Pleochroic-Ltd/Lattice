@@ -31,8 +31,9 @@ a turn or a seal leaves uncut is caught up in the nightly sleep.
 A scene is trusted only when everyone who wrote in it is an operator of the chat (what anyone else says is tainted),
 every tool result in it comes from a read-only tool or one that changes only the agent's own
 state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quoted unverified or written after the
-conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
-Lattice learns each tool's risk when a turn offers it.
+conversation took in untrusted content, no tool in it replayed stored conversation text, such as `history.search`, and
+this device can read it back: a scene that another device wrote into a shared Pleochroic graph is untrusted here. Lattice
+learns each tool's risk when a turn offers it.
 
 Once a chat's scenes have settled, Lattice groups them into periods (named stretches of what happened, such as a trip
 or a project) and older periods into eras, and writes the chat's period catalogue: its eras and periods in a few

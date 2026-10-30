@@ -34,6 +34,13 @@ class FakeConversationSource(
         conversations[conversationId] = conversations.getValue(conversationId).copy(sealed = true)
     }
 
+    /** Drops [conversationId] and its messages, as a host that never had it (another device's conversation). */
+    @Synchronized
+    fun forget(conversationId: String) {
+        conversations -= conversationId
+        messages -= conversationId
+    }
+
     /** Moves the clock messages are stamped with. */
     @Synchronized
     fun at(instant: Instant): FakeConversationSource = apply { clock = instant }
