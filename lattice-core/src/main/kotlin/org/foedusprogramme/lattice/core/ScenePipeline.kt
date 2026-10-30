@@ -282,8 +282,9 @@ class ScenePipeline(
             }
             val attempts = cursor.segmentAttempts + 1
             logger.warn("Scene segmentation failed conversation={} attempts={}: {}", info.id, attempts, e.message)
+            // Past the cap the messages never become a scene, so they hold nothing back any more.
             val failed = if (attempts >= MAX_SEGMENT_ATTEMPTS) {
-                cursor.copy(segmentAttempts = 0, fallbackThrough = run.last().position, blockedSince = run.first().at)
+                cursor.copy(segmentAttempts = 0, fallbackThrough = run.last().position, blockedSince = null)
             } else {
                 cursor.copy(segmentAttempts = attempts, blockedSince = run.first().at)
             }

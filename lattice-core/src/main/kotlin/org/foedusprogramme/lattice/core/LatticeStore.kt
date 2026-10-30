@@ -262,8 +262,8 @@ data class SceneCursorRecord(
     /** Failed attempts at the plain chunk after [segmentedThrough] (fallback only). */
     val extractAttempts: Int = 0,
     /**
-     * When the first message held back by a failed segmentation or a pending fallback was said: the chat's scenes
-     * that start later wait for it before they are narrated (it may still become an earlier scene). Null = none.
+     * When the first message held back by a failed segmentation was said: the chat's scenes that start later wait for
+     * it before they are narrated (it may still become an earlier scene). Null = none, also once segmentation gave up.
      */
     val blockedSince: Instant? = null,
     /** Sealed and wholly captured: nothing in it changes any more, and the catch-up skips it. */
