@@ -11,6 +11,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
 import java.util.concurrent.FutureTask
@@ -193,6 +194,9 @@ class ScenePipeline(
             task.get()
         } catch (e: ExecutionException) {
             throw e.cause ?: e
+        } catch (e: CancellationException) {
+            // The shutdown dropped it before it ran; a CancellationException would read as the caller's own cancellation.
+            throw IllegalStateException("The capture thread was shut down before the scene work ran.", e)
         }
     }
 

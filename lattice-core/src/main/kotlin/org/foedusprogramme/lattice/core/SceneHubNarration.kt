@@ -4,6 +4,7 @@ import org.foedusprogramme.lattice.ConversationSource
 import org.slf4j.LoggerFactory
 import java.time.ZoneId
 import java.util.concurrent.Callable
+import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
 import java.util.concurrent.FutureTask
@@ -95,6 +96,9 @@ internal class SceneHubNarration(
             barrier.get()
         } catch (e: ExecutionException) {
             throw e.cause ?: e
+        } catch (e: CancellationException) {
+            // The shutdown dropped it before it ran; a CancellationException would read as the caller's own cancellation.
+            throw IllegalStateException("The narration thread was shut down before the queued narration ran.", e)
         }
     }
 

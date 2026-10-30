@@ -61,6 +61,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.FutureTask
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
@@ -811,7 +812,8 @@ internal class DefaultLattice(
      * Refuses new calls, waits up to [LatticeSettings.shutdownTimeout] for the calls in flight (a running sleep stops at
      * its next step) and then for the scene work queued so far, then stops the threads and flushes and closes the store
      * as the graph thread's last task. Work still running at the deadline is interrupted on the capture and narration
-     * threads (a scene model call cut off this way counts no attempt); the graph thread is never interrupted. A second
+     * threads (a scene model call cut off this way counts no attempt) and work still queued there is dropped, failing
+     * whoever waits on it with [IllegalStateException]; the graph thread is never interrupted. A second
      * close waits for the first.
      */
     override suspend fun close(): Unit = withContext(NonCancellable) {
@@ -873,7 +875,8 @@ internal class DefaultLattice(
     private fun stop(executor: ExecutorService, timeout: Duration, interrupt: Boolean): Boolean {
         executor.shutdown()
         val done = executor.awaitTermination(timeout.inWholeMilliseconds, TimeUnit.MILLISECONDS)
-        if (!done && interrupt) executor.shutdownNow()
+        // A queued task the executor drops never completes on its own: cancel it, so whoever waits on it hears.
+        if (!done && interrupt) executor.shutdownNow().forEach { (it as? Future<*>)?.cancel(false) }
         return done
     }
 
@@ -924,12 +927,17 @@ internal class DefaultLattice(
 
     /**
      * Runs [block] on this executor and suspends until it ends. On cancellation the task is cancelled without an
-     * interrupt: one that hasn't started never runs, one that has runs to completion and its result is dropped.
+     * interrupt: one that hasn't started never runs, one that has runs to completion and its result is dropped. A task
+     * [close] drops before it ran fails the caller with [IllegalStateException].
      */
     private suspend fun <T> ExecutorService.await(block: () -> T): T = suspendCancellableCoroutine { cont ->
         val task = object : FutureTask<T>(Callable(block)) {
             override fun done() {
-                if (isCancelled) return
+                if (isCancelled) {
+                    // Cancelled by the close; a caller that cancelled it itself is no longer active.
+                    if (cont.isActive) cont.resumeWithException(IllegalStateException("Lattice '$name' was closed before the call ran."))
+                    return
+                }
                 try {
                     cont.resumeWith(Result.success(get()))
                 } catch (e: ExecutionException) {
