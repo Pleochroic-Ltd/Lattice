@@ -62,6 +62,7 @@ internal class SceneIndex(
     // --- scenes --------------------------------------------------------------------------------------
 
     fun putScene(scene: SceneRecord) {
+        ids.observe(scene.sceneId)
         cacheScene(scene)
         store.putScene(scene)
     }
