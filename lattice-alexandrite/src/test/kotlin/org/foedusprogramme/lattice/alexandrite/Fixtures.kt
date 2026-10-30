@@ -3,6 +3,7 @@
 package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
@@ -25,6 +26,7 @@ import org.foedusprogramme.lattice.Transcript
 import org.foedusprogramme.lattice.core.ChatTimeline
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.LatticeGraph
+import org.foedusprogramme.lattice.core.LatticeStore
 import org.foedusprogramme.lattice.core.LocalHashingEmbedder
 import org.foedusprogramme.lattice.core.MemoryTexts
 import org.foedusprogramme.lattice.core.NoOpLatticeStore
@@ -50,6 +52,7 @@ import org.unitedsoftware.alexandrite.testkit.testUser
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 /** A config with an embedder and no model. */
@@ -85,6 +88,14 @@ internal class FakeLattice(override val name: String) : Lattice {
     @Volatile
     var timelines: suspend (String) -> ChatTimeline? = { null }
 
+    /** Suspends each capture until it completes, when set. */
+    @Volatile
+    var captureGate: CompletableDeferred<Unit>? = null
+
+    /** How long [close] takes. */
+    @Volatile
+    var closeDelay: Duration = Duration.ZERO
+
     /** Suspends each sleep until it completes, when set. */
     @Volatile
     var sleepGate: CompletableDeferred<Unit>? = null
@@ -113,6 +124,7 @@ internal class FakeLattice(override val name: String) : Lattice {
     }
 
     override suspend fun capture(transcript: Transcript): Int {
+        captureGate?.await()
         captures.update { it + transcript }
         return transcript.lines.size
     }
@@ -142,6 +154,7 @@ internal class FakeLattice(override val name: String) : Lattice {
     override suspend fun <T> withGraph(block: (LatticeGraph) -> T): T = block(LatticeGraph(LocalHashingEmbedder()))
 
     override suspend fun close() {
+        delay(closeDelay)
         closed = true
     }
 
@@ -188,12 +201,20 @@ internal class FakeBackends(
     /** The sync of each graph opened, by graph name. */
     val syncs = ConcurrentHashMap<String, GraphSync>()
 
+    /** The graphs whose stores were closed, in order. */
+    val closedStores = CopyOnWriteArrayList<String>()
+
     override fun dependencies(graph: String, sync: GraphSync?): LatticeDependencies {
         if (sync != null) {
             syncs[graph] = sync
             pull?.let { pull -> sync.attach { pull(graph) } }
         }
-        return LatticeDependencies(NoOpLatticeStore, LocalHashingEmbedder(), null, texts = KeyTexts)
+        val store = object : LatticeStore by NoOpLatticeStore {
+            override fun close() {
+                closedStores += graph
+            }
+        }
+        return LatticeDependencies(store, LocalHashingEmbedder(), null, texts = KeyTexts)
     }
 
     override fun storedGraphs(): List<String> = stored

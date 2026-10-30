@@ -292,6 +292,27 @@ class PleochroicGraphStore(
         closed = true
     }
 
+    /**
+     * Saves the outbox and the graph's copy to the state directory without calling the service, then closes: for a
+     * host that stops before [close] could run. Gives up when another call holds the store for more than [wait].
+     */
+    fun closeOffline(wait: Duration = Duration.ofSeconds(2)) {
+        if (!lock.tryLock(wait.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
+            logger.warn("Graph '{}' is still busy, so its unsent writes stay where they were last saved.", graphName)
+            return
+        }
+        try {
+            if (closed) return
+            if (opened) {
+                persistQueue()
+                if (options.cacheSnapshot) runCatching { writeCache() }.onFailure { logger.warn("Graph '{}' couldn't save its copy: {}", graphName, it.message) }
+            }
+            closed = true
+        } finally {
+            lock.unlock()
+        }
+    }
+
     // -- Writing --------------------------------------------------------------
 
     private fun write(block: () -> Unit): Unit = locked {

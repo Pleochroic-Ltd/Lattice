@@ -318,10 +318,17 @@ internal class CaptureConfig(
     val onSeal: Boolean = true,
     /** Save the last compaction summary of a sealed conversation as an episode. */
     val episodes: Boolean = true,
+    /** How long the batches still pending may take to be captured while Alexandrite stops. */
+    val drainSeconds: Int = 4,
 ) {
     fun check() {
         require(turnsPerBatch in 1..MAX_BATCH) { "capture.turnsPerBatch must be between 1 and $MAX_BATCH." }
+        require(drainSeconds in 0..MAX_DRAIN_SECONDS) {
+            "capture.drainSeconds must be between 0 and $MAX_DRAIN_SECONDS, well under Alexandrite's shutdown grace."
+        }
     }
+
+    val drainTimeout: Duration get() = drainSeconds.seconds
 }
 
 @Serializable
@@ -347,7 +354,8 @@ internal class SleepConfig(
 @Serializable
 internal class GraphConfig(
     val readTimeoutSeconds: Int = 15,
-    val shutdownTimeoutSeconds: Int = 30,
+    /** How long closing a graph may take while Alexandrite stops; its stores are saved without the network after it. */
+    val shutdownTimeoutSeconds: Int = 8,
     val judgeBudget: Int = 1000,
     val judgeParallelism: Int = 4,
     val valueAwareFold: Boolean = true,
@@ -464,6 +472,7 @@ private const val MAX_BATCH = 100
 private const val MAX_SEGMENT = 1000
 private const val MAX_LOOKAHEAD = 200
 private const val MIN_WINDOW = 10
+private const val MAX_DRAIN_SECONDS = 60
 private const val DEFAULT_PULL_SECONDS = 300
 private const val MIN_PULL_SECONDS = 10
 private const val MAX_PULL_SECONDS = 86_400

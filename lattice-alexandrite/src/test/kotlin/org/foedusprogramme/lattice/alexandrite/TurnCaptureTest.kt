@@ -2,6 +2,7 @@
 
 package org.foedusprogramme.lattice.alexandrite
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import org.foedusprogramme.lattice.Transcript
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
@@ -42,6 +43,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.measureTime
 
 class TurnCaptureTest {
     private val opener = FakeOpener()
@@ -263,6 +266,19 @@ class TurnCaptureTest {
         harness().execute { exchange(turn(), "one", "a") }
 
         assertEquals(listOf("one", "a"), main.captures.value.single().lines.map { it.text })
+        assertTrue(main.closed)
+    }
+
+    @Test
+    fun `a capture that hangs while the plugin drains is given up after the drain bound`() {
+        main.captureGate = CompletableDeferred()
+        val took = measureTime {
+            harness("""{"capture": {"turnsPerBatch": 1, "drainSeconds": 1}, "graph": {"shutdownTimeoutSeconds": 1}}""")
+                .execute { exchange(turn(), "one", "a") }
+        }
+
+        assertTrue(took < 8.seconds, "the drain took $took")
+        assertTrue(main.captures.value.isEmpty())
         assertTrue(main.closed)
     }
 

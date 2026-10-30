@@ -210,6 +210,24 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `an offline close saves the outbox and the copy without calling the service`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.failNextOps = 1
+        store.putEngram(engram(2))
+        Files.deleteIfExists(dir.resolve("a/$GRAPH.snapshot.ndjson"))
+        val before = server.requests.size
+
+        store.closeOffline()
+
+        assertEquals(before, server.requests.size)
+        assertTrue(Files.readString(dir.resolve("a/$GRAPH.outbox.jsonl")).contains("\"putEngram\""))
+        assertTrue(Files.exists(dir.resolve("a/$GRAPH.snapshot.ndjson")))
+        assertFailsWith<IllegalStateException> { store.putEngram(engram(3)) }
+        assertEquals(setOf(1L, 2L), store("a").load().engrams.map { it.id }.toSet())
+    }
+
+    @Test
     fun `a failed post is retried once the back-off has passed`() {
         val store = store(options = PleochroicGraphStore.Options(minRetryDelay = Duration.ZERO)).also { it.declareEmbedding(SPEC) }
         server.failNextOps = 1

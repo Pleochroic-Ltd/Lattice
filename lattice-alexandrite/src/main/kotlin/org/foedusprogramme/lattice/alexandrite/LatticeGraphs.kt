@@ -7,6 +7,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -16,7 +18,9 @@ import org.foedusprogramme.lattice.Lattice
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.LatticeSettings
 import org.foedusprogramme.lattice.openLattice
+import org.foedusprogramme.lattice.core.LatticeStore
 import org.foedusprogramme.lattice.reloadLattice
+import org.foedusprogramme.lattice.remote.PleochroicGraphStore
 import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.chat.AgentId
 import org.unitedsoftware.alexandrite.sdk.di.Inject
@@ -30,6 +34,7 @@ import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 /** Opens a graph: [openLattice] unless a test binds another. */
 internal fun interface LatticeOpener {
@@ -42,8 +47,9 @@ internal fun interface LatticeOpener {
 }
 
 /**
- * One [Lattice] per agent, opened at its first use and closed when the plugin drains. A graph whose store other devices
- * write pulls their writes every [pullInterval] and reloads when some came in.
+ * One [Lattice] per agent, opened at its first use and closed when the plugin drains: all at once, for at most the
+ * settings' shutdown timeout and a little more, after which their stores are saved without the network as the plugin
+ * stops. A graph whose store other devices write pulls their writes every [pullInterval] and reloads when some came in.
  */
 @Singleton
 internal class LatticeGraphs internal constructor(
@@ -78,6 +84,7 @@ internal class LatticeGraphs internal constructor(
     private val graphs = LinkedHashMap<AgentId, Opening>()
     private var closed = false
     private val syncs = ConcurrentHashMap<AgentId, GraphSync>()
+    private val stores = ConcurrentHashMap<AgentId, LatticeStore>()
     private var puller: Job? = null
 
     override suspend fun onStart() {
@@ -125,20 +132,35 @@ internal class LatticeGraphs internal constructor(
             closed = true
             graphs.toMap().also { graphs.clear() }
         }
-        for ((agent, opening) in all) {
-            val lattice = opening.result.await().getOrNull() ?: continue
-            try {
-                lattice.close()
-                logger.info("Closed the memory of agent '{}'", agent)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                logger.warn("Closing the memory of agent '{}' failed", agent, e)
+        val closing = all.map { (agent, opening) ->
+            scope.async(io + CoroutineName("lattice-close-$agent")) {
+                val lattice = opening.result.await().getOrNull() ?: return@async
+                try {
+                    lattice.close()
+                    logger.info("Closed the memory of agent '{}'", agent)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    logger.warn("Closing the memory of agent '{}' failed", agent, e)
+                }
             }
+        }
+        val bound = settings.shutdownTimeout + CLOSE_MARGIN
+        if (withTimeoutOrNull(bound) { closing.awaitAll() } == null) {
+            logger.warn("The memory is still closing after {}, so its stores are saved as the plugin stops", bound)
         }
     }
 
+    /** Saves and closes every store still open, without the network: a close that ran out of time left them open. */
     override fun onStop() {
+        for ((agent, store) in stores) {
+            try {
+                if (store is PleochroicGraphStore) store.closeOffline() else store.close()
+            } catch (e: Exception) {
+                logger.warn("Closing the store of agent '{}' failed", agent, e)
+            }
+        }
+        stores.clear()
         backends.close()
     }
 
@@ -164,6 +186,7 @@ internal class LatticeGraphs internal constructor(
         }
         sync.bind { opener.reload(lattice) }
         if (sync.remote) syncs[agent] = sync
+        stores[agent] = dependencies.store
         logger.info("Opened the memory of agent '{}'", agent)
         Result.success(lattice)
     } catch (e: CancellationException) {
@@ -193,6 +216,7 @@ internal class LatticeGraphs internal constructor(
 
     private companion object {
         const val RETRY_SECONDS = 30L
+        val CLOSE_MARGIN = 2.seconds
     }
 }
 

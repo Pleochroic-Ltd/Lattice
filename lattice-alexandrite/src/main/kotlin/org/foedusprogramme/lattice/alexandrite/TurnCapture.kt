@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.foedusprogramme.lattice.Transcript
 import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.chat.AgentId
@@ -28,6 +29,7 @@ import org.unitedsoftware.alexandrite.sdk.turn.ConversationSealed
 import org.unitedsoftware.alexandrite.sdk.turn.TurnCommitted
 import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Batches the words of committed message turns per conversation and captures each batch into its agent's graph, every
@@ -69,9 +71,18 @@ internal class TurnCapture(
         }
     }
 
+    /** Captures what is pending within [CaptureConfig.drainTimeout], then gives the rest up. */
     override suspend fun onDrain() {
         events.close()
-        worker?.join()
+        val worker = worker ?: return
+        if (withTimeoutOrNull(config.drainTimeout) { worker.join() } != null) return
+        worker.cancel()
+        withTimeoutOrNull(CANCEL_GRACE) { worker.join() }
+        logger.warn(
+            "Capturing stopped {} after Alexandrite began to stop, so the last turns of {} conversation(s) go uncaptured",
+            config.drainTimeout,
+            pending.size,
+        )
     }
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
@@ -223,6 +234,7 @@ internal class TurnCapture(
 
     private companion object {
         const val CAPACITY = 1024
+        val CANCEL_GRACE = 1.seconds
     }
 }
 

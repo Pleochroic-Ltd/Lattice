@@ -88,10 +88,14 @@ Lattice reads `plugins.lattice`:
   `timeoutMillis` (also bounds reading the catalogue), `fallback` (`drop` or `bake`: whether an endpoint that cannot
   show the block for one turn alone leaves it out or keeps it in the turn's message), and `catalogue` (on by default:
   whether each turn's system prompt carries the chat's period catalogue; read only with scenes on).
-- `capture`: `enabled`, `turnsPerBatch`, `onCompaction`, `onSeal`, and `episodes`.
+- `capture`: `enabled`, `turnsPerBatch`, `onCompaction`, `onSeal`, `episodes`, and `drainSeconds` (4 by default: how
+  long the batches still pending may take to be captured while Alexandrite stops; the rest is not captured).
 - `sleep`: `enabled`, `at` (a local time `HH:mm`) and `zone`.
 - `graph`: the engine's switches, such as `entityExtraction`, `entityRecall`, `sameDayEpisodes`, `judgeBudget` and
-  `readTimeoutSeconds`.
+  `readTimeoutSeconds`, and `shutdownTimeoutSeconds` (8 by default: how long the graphs, closed together, may take to
+  finish their work while Alexandrite stops; their stores are then saved without the network). Alexandrite gives all
+  plugins 15 seconds by default to stop, so keep `capture.drainSeconds` and `graph.shutdownTimeoutSeconds` well under
+  that together.
 - `scenes`: `enabled` (off by default; needs a model and Alexandrite's stores, and replaces `capture`'s batches),
   `sceneEpisodes` (recall shows when each memory was said, and scene summaries beside facts), `narrationCheck`
   (`anchors` or `selfCheck`), `segmentBatchMessages` (said messages that gather before a live conversation is cut),
