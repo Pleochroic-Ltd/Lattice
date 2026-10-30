@@ -157,7 +157,7 @@ class DefaultLatticeSleepTest {
 
         val without = LatticeTestKit.open(settings = scenesOn, model = model)
         val bare = without.sleep(setOf(SleepPhase.CATCH_UP, SleepPhase.PERIODS))
-        assertEquals("Scene catch-up is not available in this build.", bare.of(SleepPhase.CATCH_UP).skipReason)
+        assertEquals("The host provides no conversations to read scenes from.", bare.of(SleepPhase.CATCH_UP).skipReason)
         assertEquals("Period formation is not available in this build.", bare.of(SleepPhase.PERIODS).skipReason)
         without.close()
 

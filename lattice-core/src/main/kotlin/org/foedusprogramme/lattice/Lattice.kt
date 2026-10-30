@@ -30,8 +30,21 @@ interface Lattice {
     /**
      * Extracts memories from [transcript] and encodes them; returns how many engrams were written or reinforced.
      * Throws when the model can't extract (after recording a dead letter for an unparseable answer).
+     *
+     * With scenes on (a [LatticeDependencies.conversations] source, [SceneSettings.enabled] and a model), a transcript
+     * whose [Transcript.Source.conversationId] is set is not extracted here: the call tells the scene pipeline that the
+     * conversation has new messages and returns 0 at once. The pipeline reads the messages back from the source, cuts
+     * them into scenes and extracts each scene in the background, so [transcript]'s lines are ignored. A transcript
+     * without a conversation id is extracted as above.
      */
     suspend fun capture(transcript: Transcript): Int
+
+    /**
+     * The host sealed conversation [conversationId] (it takes no more messages): the scene pipeline segments and
+     * extracts what is left of it, ends its last scene and narrates it, in the background. Returns at once; a no-op
+     * without scenes.
+     */
+    suspend fun conversationSealed(conversationId: String)
 
     /** Saves a whole conversation's summary as an episode node; null when episode nodes are off or it was a duplicate. */
     suspend fun saveEpisode(summary: String, source: Transcript.Source? = null): Long?
