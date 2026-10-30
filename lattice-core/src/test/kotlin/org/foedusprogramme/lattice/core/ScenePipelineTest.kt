@@ -212,6 +212,28 @@ class ScenePipelineTest {
     }
 
     @Test
+    fun `a range that reads back nothing is never extracted, and is given up at the cap`() {
+        val r = rig().apply { open() }
+        r.say(A, "kyoto", "gradle")
+        r.capture.fail = { t -> if (t.lines.any { it.text == "topic=kyoto message 1" }) UnparseableExtractionException("not JSON") else null }
+        r.seal(A)
+        val kyoto = r.scenes().first()
+        r.capture.fail = { null }
+        r.g { it.putScene(kyoto.copy(firstMessageId = 100_000, lastMessageId = 100_050)) }
+
+        r.pipeline.catchUp()
+        r.pipeline.awaitIdle()
+        val work = r.work(kyoto.sceneId)
+        assertEquals(EXTRACTING to 2, work.state to work.extractAttempts)
+        assertNull(work.extractedThrough, "an empty read is not an extraction")
+
+        r.pipeline.catchUp()
+        r.pipeline.awaitIdle()
+        assertEquals(1, r.work(kyoto.sceneId).chunksFailed)
+        assertEquals(listOf("kyoto" to ABANDONED, "gradle" to MATERIALIZED), r.states())
+    }
+
+    @Test
     fun `an extraction the shutdown cut off counts nothing`() {
         val r = rig().apply { open() }
         r.say(A, "kyoto", "gradle")
@@ -364,6 +386,38 @@ class ScenePipelineTest {
         assertEquals(gradle.sceneId, second.scenes()[1].sceneId, "the OPEN scene is continued, not split")
         assertEquals(hub, second.hub("gradle")!!.id)
         assertEquals(3L, second.scenes().last().seq)
+    }
+
+    // --- two devices -------------------------------------------------------------------------------------------------
+
+    @Test
+    fun `a device's catch-up leaves another device's scenes in a shared graph alone`() {
+        val shared = TestLatticeStore()
+        val a = rig(shared).apply { open() }
+        a.say(A, "kyoto", perTopic = 14)
+        a.say(A, "gradle")
+        a.capture.fail = { t -> if (t.lines.any { it.text == "topic=kyoto message 1" }) UnparseableExtractionException("not JSON") else null }
+        a.seal(A)
+        val before = a.scenes().map { a.work(it.sceneId) }
+        assertEquals(listOf(EXTRACTING, NARRATING), before.map { it.state })
+        a.close()
+
+        val b = SceneRig(TestLatticeStore(idSlot = 1, initial = shared.load()), FakeConversationSource()).also { rigs += it }
+        b.open(B)
+        b.source.at(Instant.parse("2026-09-02T09:00:00Z"))
+        b.say(B, "curry")
+        b.seal(B)
+        repeat(2) {
+            b.pipeline.catchUp()
+            b.pipeline.awaitIdle()
+        }
+
+        val (kyoto, gradle, curry) = b.scenes()
+        assertEquals(before, listOf(b.work(kyoto.sceneId), b.work(gradle.sceneId)), "device A's scenes are A's to settle")
+        assertNull(b.hub("gradle"))
+        assertEquals(listOf(curry.sceneId), b.capture.calls.map { it.sceneId }.distinct())
+        assertEquals(NARRATING, b.work(curry.sceneId).state, "a later scene still waits for the earlier ones")
+        assertTrue(b.model.narrations.isEmpty())
     }
 
     private companion object {

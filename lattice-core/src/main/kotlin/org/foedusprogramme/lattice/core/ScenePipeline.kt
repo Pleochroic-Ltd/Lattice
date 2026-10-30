@@ -433,15 +433,20 @@ class ScenePipeline(
 
     // --- extraction --------------------------------------------------------------------------------------------------
 
-    /** Scenes of [conversationId] (null = of every conversation) whose extraction stopped at a failed chunk: try again. */
+    /**
+     * Scenes of [conversationId] (null = of every conversation this host has) whose extraction stopped at a failed
+     * chunk: try again. Another device's scenes in a shared graph are left to it.
+     */
     private fun retryPendingScenes(conversationId: String?, pass: Pass) {
         val pending = graph.withGraph { g ->
             g.scenes().filter { s ->
                 val work = g.sceneWork(s.sceneId)
                 (conversationId == null || s.conversationId == conversationId) && work != null && pendingExtraction(s, work)
-            }.sortedWith(SCENE_ORDER).map { it.sceneId }
+            }.sortedWith(SCENE_ORDER).map { it.sceneId to it.conversationId }
         }
-        for (sceneId in pending) {
+        val hosted = Hosted()
+        for ((sceneId, conversation) in pending) {
+            if (!hosted(conversation)) continue
             extractScene(sceneId, pass)
             reevaluate(sceneId)
         }
@@ -464,6 +469,10 @@ class ScenePipeline(
         }
         if (scene == null || start == null) return
         val messages = source.messages(scene.conversationId, start, scene.lastMessageId)
+        if (messages.isEmpty()) {
+            unreadRange(scene, start)
+            return
+        }
         val chunks = messages.filter { it.said }.chunked(chunkSize)
         var previousEnd = start - 1
         for ((i, chunk) in chunks.withIndex()) {
@@ -505,6 +514,40 @@ class ScenePipeline(
         }
         if (chunks.isEmpty()) {
             graph.withGraph { g -> g.sceneWork(sceneId)?.let { g.putSceneState(work = it.copy(extractedThrough = scene.lastMessageId)) } }
+        }
+    }
+
+    /**
+     * The range [start]..last of [scene] read back nothing, so none of it can count as extracted. Another device's
+     * conversation is left to it; one this host has counts a failed chunk, and at the cap the range is given up (the
+     * scene is incomplete) so that it does not hold the chat's later scenes back for good.
+     */
+    private fun unreadRange(scene: SceneRecord, start: Long) {
+        if (!Hosted()(scene.conversationId)) return
+        val gaveUp = settle { g ->
+            val work = g.sceneWork(scene.sceneId) ?: return@settle false
+            val next = if (work.extractAttempts + 1 >= MAX_CHUNK_ATTEMPTS) {
+                work.copy(extractedThrough = scene.lastMessageId, extractAttempts = 0, chunksFailed = work.chunksFailed + 1)
+            } else {
+                work.copy(extractAttempts = work.extractAttempts + 1)
+            }
+            g.putSceneState(work = next)
+            next.extractedThrough == scene.lastMessageId
+        }
+        logger.warn(
+            "Scene messages read back nothing scene={} messages={}..{} conversation={}{}",
+            scene.sceneId, start, scene.lastMessageId, scene.conversationId, if (gaveUp) "; given up" else "",
+        )
+    }
+
+    /** Whether this host has each conversation asked about, read once per instance; a read that fails says no. */
+    private inner class Hosted {
+        private val known = HashMap<String, Boolean>()
+
+        operator fun invoke(conversationId: String): Boolean = known.getOrPut(conversationId) {
+            runCatching { source.conversation(conversationId) != null }
+                .onFailure { logger.warn("Scene pipeline: conversation {} is unreadable: {}", conversationId, it.message) }
+                .getOrDefault(false)
         }
     }
 
@@ -585,10 +628,13 @@ class ScenePipeline(
     private fun catchUpNow(): Int {
         // Scenes already waiting on narration are offered once more at the end; one that becomes ready during the pass
         // is offered by its own hand-over.
-        val waiting = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.NARRATING }.map { it.sceneId } }
+        // Another device's scenes in a shared graph are its own to extract and narrate.
+        val hosted = Hosted()
+        val waiting = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.NARRATING } }
+            .filter { hosted(it.conversationId) }.map { it.sceneId }
         val cursors = graph.withGraph { g -> g.sceneCursors().associateBy { it.conversationId } }
         val conversations = LinkedHashSet<String>()
-        cursors.values.filter { !it.finished }.mapTo(conversations) { it.conversationId }
+        cursors.values.filter { !it.finished && hosted(it.conversationId) }.mapTo(conversations) { it.conversationId }
         val chats = runCatching { source.chats() }
             .onFailure { logger.warn("Scene catch-up: the host's chats are unreadable: {}", it.message) }
             .getOrDefault(emptyList())
@@ -612,7 +658,8 @@ class ScenePipeline(
                 .getOrDefault(0)
         }
         // Heal scenes whose extraction settled without a hand-over, then re-offer the ones that were waiting.
-        val settled = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.EXTRACTING }.map { it.sceneId } }
+        val settled = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.EXTRACTING } }
+            .filter { hosted(it.conversationId) }.map { it.sceneId }
         settled.forEach(::reevaluate)
         for (sceneId in waiting) {
             if (graph.withGraph { it.sceneWork(sceneId)?.state } == SceneWorkState.NARRATING) narration.offer(sceneId)
