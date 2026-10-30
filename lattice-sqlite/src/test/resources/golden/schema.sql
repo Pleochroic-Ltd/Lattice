@@ -206,7 +206,21 @@ CREATE TABLE scene (
     date_from TEXT,
     date_to TEXT,
     in_progress INTEGER NOT NULL DEFAULT 0,
-    hub_engram_id INTEGER REFERENCES engram (id) ON DELETE SET NULL
+    hub_engram_id INTEGER REFERENCES engram (id) ON DELETE SET NULL,
+    started_at TEXT,
+    seq INTEGER NOT NULL DEFAULT 0
+);
+
+-- table scene_cursor
+CREATE TABLE scene_cursor (
+    conversation_id TEXT PRIMARY KEY,
+    chat_key TEXT NOT NULL,
+    segmented_through INTEGER,
+    segment_attempts INTEGER NOT NULL DEFAULT 0,
+    fallback_through INTEGER,
+    extract_attempts INTEGER NOT NULL DEFAULT 0,
+    blocked_since TEXT,
+    finished INTEGER NOT NULL DEFAULT 0
 );
 
 -- table scene_member
@@ -214,6 +228,18 @@ CREATE TABLE scene_member (
     scene_id INTEGER NOT NULL REFERENCES scene (scene_id) ON DELETE CASCADE,
     engram_id INTEGER NOT NULL REFERENCES engram (id) ON DELETE CASCADE,
     PRIMARY KEY (scene_id, engram_id)
+);
+
+-- table scene_work
+CREATE TABLE scene_work (
+    scene_id INTEGER PRIMARY KEY REFERENCES scene (scene_id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    synopsis TEXT,
+    extracted_through INTEGER,
+    extract_attempts INTEGER NOT NULL DEFAULT 0,
+    chunks_done INTEGER NOT NULL DEFAULT 0,
+    chunks_failed INTEGER NOT NULL DEFAULT 0,
+    narrate_attempts INTEGER NOT NULL DEFAULT 0
 );
 
 -- table thread

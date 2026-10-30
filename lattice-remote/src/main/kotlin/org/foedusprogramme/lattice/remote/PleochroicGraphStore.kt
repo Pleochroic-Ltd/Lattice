@@ -24,7 +24,9 @@ import org.foedusprogramme.lattice.core.PeriodExclusionRecord
 import org.foedusprogramme.lattice.core.PeriodFailureRecord
 import org.foedusprogramme.lattice.core.PeriodMemberRecord
 import org.foedusprogramme.lattice.core.PeriodRecord
+import org.foedusprogramme.lattice.core.SceneCursorRecord
 import org.foedusprogramme.lattice.core.SceneRecord
+import org.foedusprogramme.lattice.core.SceneWorkRecord
 import org.foedusprogramme.lattice.core.ThreadLinkRecord
 import org.foedusprogramme.lattice.core.ThreadRecord
 import org.foedusprogramme.lattice.core.VerdictRecord
@@ -232,6 +234,8 @@ class PleochroicGraphStore(
     override fun mergeEntities(fromId: Long, toId: Long) = write { mirror.mergeEntities(fromId, toId) }
     override fun putScene(scene: SceneRecord) = write { mirror.putScene(scene) }
     override fun putSceneMember(sceneId: Long, engramId: Long) = write { mirror.putSceneMember(sceneId, engramId) }
+    override fun putSceneWork(work: SceneWorkRecord) = write { mirror.putSceneWork(work) }
+    override fun putSceneCursor(cursor: SceneCursorRecord) = write { mirror.putSceneCursor(cursor) }
     override fun redirectSceneMembers(fromEngramId: Long, toEngramId: Long) = write { mirror.redirectSceneMembers(fromEngramId, toEngramId) }
     override fun putThread(thread: ThreadRecord) = write { mirror.putThread(thread) }
     override fun putThreadLink(link: ThreadLinkRecord) = write { mirror.putThreadLink(link) }
@@ -726,6 +730,8 @@ class PleochroicGraphStore(
             is Row.ResolvedRow -> listOf(row.engramId)
             is Row.SceneRow -> listOfNotNull(row.record.sceneId, row.record.hubEngramId)
             is Row.SceneMemberRow -> listOf(row.sceneId, row.engramId)
+            is Row.SceneWorkRow -> listOf(row.record.sceneId)
+            is Row.SceneCursorRow -> emptyList()
             is Row.ThreadRow -> listOf(row.record.id)
             is Row.ThreadLinkRow -> listOf(row.record.threadId, row.record.engramId)
             is Row.PeriodRow -> listOfNotNull(row.record.id, row.record.eraId)

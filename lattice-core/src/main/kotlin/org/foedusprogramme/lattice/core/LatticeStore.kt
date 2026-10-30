@@ -56,6 +56,15 @@ interface LatticeStore : AutoCloseable {
 
     fun putScene(scene: SceneRecord)
 
+    /**
+     * Upserts the scene pipeline's work state of [SceneWorkRecord.sceneId], whose scene must exist. Scenes are never
+     * deleted, so nothing cascades to it.
+     */
+    fun putSceneWork(work: SceneWorkRecord)
+
+    /** Upserts the scene pipeline's cursor of [SceneCursorRecord.conversationId]; it names no other row. */
+    fun putSceneCursor(cursor: SceneCursorRecord)
+
     fun putSceneMember(sceneId: Long, engramId: Long)
 
     /** Moves the scene memberships of [fromEngramId] to [toEngramId] (a membership both have is kept once). */
@@ -114,6 +123,8 @@ interface LatticeStore : AutoCloseable {
         val scenes: List<SceneRecord> = emptyList(),
         /** (sceneId, engramId) */
         val sceneMembers: List<Pair<Long, Long>> = emptyList(),
+        val sceneWork: List<SceneWorkRecord> = emptyList(),
+        val sceneCursors: List<SceneCursorRecord> = emptyList(),
         val threads: List<ThreadRecord> = emptyList(),
         val threadLinks: List<ThreadLinkRecord> = emptyList(),
         val periods: List<PeriodRecord> = emptyList(),
@@ -168,7 +179,9 @@ data class EntityRecord(
 
 /**
  * A scene: a stretch of one conversation about one thing. Message ids are the host's positions in that conversation
- * (monotonic within it), so [firstMessageId]..[lastMessageId] is a range.
+ * (monotonic within it), so [firstMessageId]..[lastMessageId] is a range. Positions say nothing across conversations
+ * and ids nothing across id slots, so the scenes of a chat are ordered by [SCENE_ORDER]: [dateFrom], then [startedAt],
+ * then [seq].
  */
 data class SceneRecord(
     val sceneId: Long,
@@ -181,6 +194,80 @@ data class SceneRecord(
     val dateTo: String? = null,
     val inProgress: Boolean = false,
     val hubEngramId: Long? = null,
+    /** When the scene's first message was said; null for a scene written without one. */
+    val startedAt: Instant? = null,
+    /** The scene's place in its chat's capture order (1, 2, …), the tie-break of [SCENE_ORDER]; 0 = none given. */
+    val seq: Long = 0,
+)
+
+/**
+ * The order of a chat's scenes, oldest first: local start date, start instant, capture sequence, then id. A scene
+ * without a date or an instant sorts after the ones that have it.
+ */
+val SCENE_ORDER: Comparator<SceneRecord> = compareBy<SceneRecord, String?>(nullsLast()) { it.dateFrom }
+    .thenBy(nullsLast()) { it.startedAt }
+    .thenBy { it.seq }
+    .thenBy { it.sceneId }
+
+/** Where a scene is in the pipeline: segmented and extracting while it may still grow, then narrated once. */
+enum class SceneWorkState {
+    /** Its conversation may still continue it (or it was cut mid-way); its messages are extracted as they come. */
+    OPEN,
+
+    /** Ended; some of its messages are still to be extracted. */
+    EXTRACTING,
+
+    /** Every message is extracted (or given up on): waiting for, or in, narration. */
+    NARRATING,
+
+    /** Hub and thread changes written. */
+    MATERIALIZED,
+
+    /** Narration failed past its cap (or the scene kept no memory); later scenes of the chat go on. */
+    ABANDONED,
+}
+
+/** The scene pipeline's state of one scene, next to its [SceneRecord]. */
+data class SceneWorkRecord(
+    val sceneId: Long,
+    val state: SceneWorkState,
+    /** The segmenter's one- or two-sentence account, shown to the narrator and to a segmentation that continues it. */
+    val synopsis: String? = null,
+    /** The last position whose extraction is settled, done or given up; null = none yet. */
+    val extractedThrough: Long? = null,
+    /** Failed attempts at the chunk after [extractedThrough]. */
+    val extractAttempts: Int = 0,
+    val chunksDone: Int = 0,
+    /** Chunks given up on after their attempts ran out: the scene's memories are incomplete. */
+    val chunksFailed: Int = 0,
+    val narrateAttempts: Int = 0,
+)
+
+/**
+ * The scene pipeline's progress through one conversation: everything up to [segmentedThrough] is in a scene or was
+ * extracted without one; what follows waits to be segmented.
+ */
+data class SceneCursorRecord(
+    val conversationId: String,
+    val chatKey: String,
+    /** The last position given to a scene or extracted without one; null = nothing yet. */
+    val segmentedThrough: Long? = null,
+    /** Failed segmentations of the messages after [segmentedThrough]. */
+    val segmentAttempts: Int = 0,
+    /**
+     * Segmentation gave up on the messages up to here: they are extracted in plain chunks, without a scene, before
+     * anything after them is segmented. Null = no fallback pending.
+     */
+    val fallbackThrough: Long? = null,
+    /** Failed attempts at the plain chunk after [segmentedThrough] (fallback only). */
+    val extractAttempts: Int = 0,
+    /**
+     * When the first message held back by a failed segmentation or a pending fallback was said: the chat's scenes
+     * that start later wait for it before they are narrated (it may still become an earlier scene). Null = none.
+     */
+    val blockedSince: Instant? = null,
+    /** Sealed and wholly captured: nothing in it changes any more, and the catch-up skips it. */
+    val finished: Boolean = false,
 )
 
 enum class ThreadState { OPEN, CLOSED, DROPPED, STALE }

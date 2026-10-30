@@ -57,7 +57,7 @@ internal class PeriodIndex(
     private val store: LatticeStore,
     /** The graph's id allocator: period and era ids come from the one sequence every id does. */
     private val ids: IdAllocator,
-    /** The scene row of a scene id (the graph's scene index): its chat, first message id and dates. */
+    /** The scene row of a scene id (the graph's scene index): its chat, its place in [SCENE_ORDER] and its dates. */
     private val scenes: (Long) -> SceneRecord?,
 ) {
     private data class FailureKey(val kind: PeriodFailureKind, val firstSceneId: Long)
@@ -76,13 +76,14 @@ internal class PeriodIndex(
         /** language key -> snapshot. */
         val catalogues: Map<String, CatalogueSnapshot>,
         val generation: Long,
-        firstMessageOf: (Long) -> Long,
+        sceneOrder: Comparator<Long>,
     ) {
-        /** period id -> member scene ids by first message id (then scene id). */
+        /** period id -> member scene ids in [SCENE_ORDER]. */
         val scenesByPeriod: Map<Long, List<Long>> = members.entries.groupBy({ it.value }, { it.key })
-            .mapValues { (_, ids) -> ids.sortedWith(compareBy({ firstMessageOf(it) }, { it })) }
+            .mapValues { (_, ids) -> ids.sortedWith(sceneOrder) }
         val orderedPeriods: List<PeriodRecord> = periods.values.sortedWith(
-            compareBy({ p -> scenesByPeriod[p.id]?.firstOrNull()?.let(firstMessageOf) ?: Long.MAX_VALUE }, { it.id }),
+            compareBy<PeriodRecord, Long?>(Comparator.nullsLast(sceneOrder)) { p -> scenesByPeriod[p.id]?.firstOrNull() }
+                .thenBy { it.id },
         )
         val orderedEras: List<EraRecord> = run {
             val rank = orderedPeriods.withIndex().associate { (i, p) -> p.id to i }
@@ -110,7 +111,9 @@ internal class PeriodIndex(
     /** scene id -> content trusted (filled by the trust check on the narration thread; RAM only). */
     private val trust = HashMap<Long, Boolean>()
 
-    private fun firstMessageOf(sceneId: Long): Long = scenes(sceneId)?.firstMessageId ?: Long.MAX_VALUE
+    /** Scene ids in [SCENE_ORDER]; an id with no scene row sorts last. */
+    private val sceneOrder: Comparator<Long> =
+        compareBy<Long, SceneRecord?>(Comparator.nullsLast(SCENE_ORDER)) { scenes(it) }.thenBy { it }
 
     /** Rehydrate from a store load (no write-through; the stored date ranges are taken as they are). */
     fun load(loaded: LatticeStore.Loaded) {
@@ -139,7 +142,7 @@ internal class PeriodIndex(
                 failures = loaded.periodFailures.filter { it.chatKey == chat }.associateBy { FailureKey(it.kind, it.firstSceneId) },
                 catalogues = loaded.catalogueSnapshots.filter { it.chatKey == chat }.associateBy { languageKey(it.language) },
                 generation = loaded.periodGenerations[chat] ?: 0L,
-                firstMessageOf = ::firstMessageOf,
+                sceneOrder = sceneOrder,
             )
             install(chat, state)
         }
@@ -353,7 +356,7 @@ internal class PeriodIndex(
             failures = failures,
             catalogues = catalogues,
             generation = generation,
-            firstMessageOf = ::firstMessageOf,
+            sceneOrder = sceneOrder,
         )
     }
 

@@ -221,8 +221,8 @@ object RecallFormatter {
     /**
      * What follows a turn-end recall hit of chat [chatKey]: the period of its scene (`〔时期：…〕`), or nothing. The
      * scene is the hub's own scene for a scene hub, else the scenes the memory is a member of — only those of
-     * [chatKey] (a memory shared with another chat's scene takes this chat's), the earliest by first message id that
-     * is in a period. A manual memory and a synthesized one carry none. [labels] caches each period's label for the
+     * [chatKey] (a memory shared with another chat's scene takes this chat's), the earliest ([SCENE_ORDER]) that is in
+     * a period. A manual memory and a synthesized one carry none. [labels] caches each period's label for the
      * block.
      */
     private fun periodTag(
@@ -238,7 +238,7 @@ object RecallFormatter {
         val scenes = if (hubScene != null) listOf(hubScene) else lookup.scenesOf(engram.id)
         val period = scenes.asSequence()
             .filter { it.chatKey == chatKey }
-            .sortedWith(compareBy({ it.firstMessageId }, { it.sceneId }))
+            .sortedWith(SCENE_ORDER)
             .firstNotNullOfOrNull { lookup.periodOfScene(it.sceneId) }
             ?: return ""
         val label = labels.getOrPut(period.id) { lookup.periodLabel(period) } ?: return ""

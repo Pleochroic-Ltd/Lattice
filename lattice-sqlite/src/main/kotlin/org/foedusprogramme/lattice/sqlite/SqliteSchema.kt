@@ -12,8 +12,9 @@ internal object SqliteSchema {
 
     /**
      * The first schema. An edge keeps its direction (`from_id`, `to_id`, unique on the unordered pair), an engram has
-     * `tainted`, a verdict is keyed by the judge key, a thread link goes with its engram (a trigger), and `meta` holds
-     * the embedding spec.
+     * `tainted`, a verdict is keyed by the judge key, a thread link goes with its engram (a trigger), `meta` holds the
+     * embedding spec, a scene has its order key (`started_at`, `seq`), and the scene pipeline's state lives in
+     * `scene_work` and `scene_cursor`.
      */
     private fun v1(): List<String> = buildList {
         add("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -106,7 +107,9 @@ internal object SqliteSchema {
                 date_from TEXT,
                 date_to TEXT,
                 in_progress INTEGER NOT NULL DEFAULT 0,
-                hub_engram_id INTEGER REFERENCES engram (id) ON DELETE SET NULL
+                hub_engram_id INTEGER REFERENCES engram (id) ON DELETE SET NULL,
+                started_at TEXT,
+                seq INTEGER NOT NULL DEFAULT 0
             )
             """,
         )
@@ -122,6 +125,34 @@ internal object SqliteSchema {
             """,
         )
         add("CREATE INDEX scene_member_engram ON scene_member (engram_id)")
+        add(
+            """
+            CREATE TABLE scene_work (
+                scene_id INTEGER PRIMARY KEY REFERENCES scene (scene_id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                synopsis TEXT,
+                extracted_through INTEGER,
+                extract_attempts INTEGER NOT NULL DEFAULT 0,
+                chunks_done INTEGER NOT NULL DEFAULT 0,
+                chunks_failed INTEGER NOT NULL DEFAULT 0,
+                narrate_attempts INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+        )
+        add(
+            """
+            CREATE TABLE scene_cursor (
+                conversation_id TEXT PRIMARY KEY,
+                chat_key TEXT NOT NULL,
+                segmented_through INTEGER,
+                segment_attempts INTEGER NOT NULL DEFAULT 0,
+                fallback_through INTEGER,
+                extract_attempts INTEGER NOT NULL DEFAULT 0,
+                blocked_since TEXT,
+                finished INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+        )
         add(
             """
             CREATE TABLE thread (

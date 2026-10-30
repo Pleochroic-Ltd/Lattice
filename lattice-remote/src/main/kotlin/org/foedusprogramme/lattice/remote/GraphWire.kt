@@ -31,7 +31,10 @@ import org.foedusprogramme.lattice.core.PeriodFailureRecord
 import org.foedusprogramme.lattice.core.PeriodMemberRecord
 import org.foedusprogramme.lattice.core.PeriodRecord
 import org.foedusprogramme.lattice.core.PeriodState
+import org.foedusprogramme.lattice.core.SceneCursorRecord
 import org.foedusprogramme.lattice.core.SceneRecord
+import org.foedusprogramme.lattice.core.SceneWorkRecord
+import org.foedusprogramme.lattice.core.SceneWorkState
 import org.foedusprogramme.lattice.core.Speaker
 import org.foedusprogramme.lattice.core.ThreadLinkRecord
 import org.foedusprogramme.lattice.core.ThreadRecord
@@ -69,6 +72,8 @@ internal object GraphWire {
     const val ENTITY_RESOLVED = "entityResolved"
     const val SCENE = "scene"
     const val SCENE_MEMBER = "sceneMember"
+    const val SCENE_WORK = "sceneWork"
+    const val SCENE_CURSOR = "sceneCursor"
     const val THREAD = "thread"
     const val THREAD_LINK = "threadLink"
     const val PERIOD = "period"
@@ -293,11 +298,27 @@ internal object GraphWire {
                 put("chatKey", r.chatKey); put("firstMessageId", r.firstMessageId); put("lastMessageId", r.lastMessageId)
                 r.dateFrom?.let { put("dateFrom", it) }; r.dateTo?.let { put("dateTo", it) }
                 put("inProgress", r.inProgress); r.hubEngramId?.let { put("hubEngramId", it) }
+                r.startedAt?.let { put("startedAt", it.toString()) }; put("seq", r.seq)
             })
         }
         is Row.SceneMemberRow -> Triple(SCENE_MEMBER, key(row.sceneId, row.engramId), obj {
             put("sceneId", row.sceneId); put("engramId", row.engramId)
         })
+        is Row.SceneWorkRow -> row.record.let { r ->
+            Triple(SCENE_WORK, key(r.sceneId), obj {
+                put("sceneId", r.sceneId); put("state", r.state.name); r.synopsis?.let { put("synopsis", it) }
+                r.extractedThrough?.let { put("extractedThrough", it) }; put("extractAttempts", r.extractAttempts)
+                put("chunksDone", r.chunksDone); put("chunksFailed", r.chunksFailed); put("narrateAttempts", r.narrateAttempts)
+            })
+        }
+        is Row.SceneCursorRow -> row.record.let { r ->
+            Triple(SCENE_CURSOR, key(r.conversationId), obj {
+                put("conversationId", r.conversationId); put("chatKey", r.chatKey)
+                r.segmentedThrough?.let { put("segmentedThrough", it) }; put("segmentAttempts", r.segmentAttempts)
+                r.fallbackThrough?.let { put("fallbackThrough", it) }; put("extractAttempts", r.extractAttempts)
+                r.blockedSince?.let { put("blockedSince", it.toString()) }; put("finished", r.finished)
+            })
+        }
         is Row.ThreadRow -> row.record.let { r ->
             Triple(THREAD, key(r.id), obj {
                 put("id", r.id); put("chatKey", r.chatKey); put("description", r.description); put("state", r.state.name)
@@ -383,9 +404,35 @@ internal object GraphWire {
                 dateTo = d.string("dateTo"),
                 inProgress = d.bool("inProgress") ?: false,
                 hubEngramId = d.long("hubEngramId"),
+                startedAt = d.instant("startedAt"),
+                seq = d.long("seq") ?: 0,
             ),
         )
         SCENE_MEMBER -> Row.SceneMemberRow(d.long("sceneId").need("sceneId"), d.long("engramId").need("engramId"))
+        SCENE_WORK -> Row.SceneWorkRow(
+            SceneWorkRecord(
+                sceneId = d.long("sceneId").need("sceneId"),
+                state = enumOf(d.string("state").need("state")),
+                synopsis = d.string("synopsis"),
+                extractedThrough = d.long("extractedThrough"),
+                extractAttempts = d.int("extractAttempts") ?: 0,
+                chunksDone = d.int("chunksDone") ?: 0,
+                chunksFailed = d.int("chunksFailed") ?: 0,
+                narrateAttempts = d.int("narrateAttempts") ?: 0,
+            ),
+        )
+        SCENE_CURSOR -> Row.SceneCursorRow(
+            SceneCursorRecord(
+                conversationId = d.string("conversationId").need("conversationId"),
+                chatKey = d.string("chatKey").need("chatKey"),
+                segmentedThrough = d.long("segmentedThrough"),
+                segmentAttempts = d.int("segmentAttempts") ?: 0,
+                fallbackThrough = d.long("fallbackThrough"),
+                extractAttempts = d.int("extractAttempts") ?: 0,
+                blockedSince = d.instant("blockedSince"),
+                finished = d.bool("finished") ?: false,
+            ),
+        )
         THREAD -> Row.ThreadRow(
             ThreadRecord(
                 id = d.long("id").need("id"),
@@ -469,6 +516,8 @@ internal object GraphWire {
             ENTITY_RESOLVED -> Row.ResolvedRow(long(0))
             SCENE -> Row.SceneRow(SceneRecord(long(0), "", "", "", 0, 0))
             SCENE_MEMBER -> Row.SceneMemberRow(long(0), long(1))
+            SCENE_WORK -> Row.SceneWorkRow(SceneWorkRecord(long(0), SceneWorkState.OPEN))
+            SCENE_CURSOR -> Row.SceneCursorRow(SceneCursorRecord(text(0), ""))
             THREAD -> Row.ThreadRow(ThreadRecord(long(0), "", ""))
             THREAD_LINK -> Row.ThreadLinkRow(ThreadLinkRecord(long(0), long(1), enumOf(text(2))))
             PERIOD -> Row.PeriodRow(PeriodRecord(long(0), "", ""))

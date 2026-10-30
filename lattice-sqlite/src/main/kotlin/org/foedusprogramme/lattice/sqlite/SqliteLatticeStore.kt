@@ -16,7 +16,10 @@ import org.foedusprogramme.lattice.core.PeriodFailureRecord
 import org.foedusprogramme.lattice.core.PeriodMemberRecord
 import org.foedusprogramme.lattice.core.PeriodRecord
 import org.foedusprogramme.lattice.core.PeriodState
+import org.foedusprogramme.lattice.core.SceneCursorRecord
 import org.foedusprogramme.lattice.core.SceneRecord
+import org.foedusprogramme.lattice.core.SceneWorkRecord
+import org.foedusprogramme.lattice.core.SceneWorkState
 import org.foedusprogramme.lattice.core.Speaker
 import org.foedusprogramme.lattice.core.ThreadLinkRecord
 import org.foedusprogramme.lattice.core.ThreadRecord
@@ -165,9 +168,41 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
                     dateTo = rs.getString("date_to"),
                     inProgress = rs.getInt("in_progress") == 1,
                     hubEngramId = rs.longOrNull("hub_engram_id"),
+                    startedAt = rs.getString("started_at")?.let(Instant::parse),
+                    seq = rs.getLong("seq"),
                 )
             },
             sceneMembers = rows("SELECT scene_id, engram_id FROM scene_member ORDER BY rowid") { it.getLong(1) to it.getLong(2) },
+            sceneWork = rows("SELECT * FROM scene_work ORDER BY rowid") { rs ->
+                val state = runCatching { SceneWorkState.valueOf(rs.getString("state")) }.getOrNull()
+                if (state == null) {
+                    logger.warn("Skipped the work state of scene {}: unknown state {}.", rs.getLong("scene_id"), rs.getString("state"))
+                    null
+                } else {
+                    SceneWorkRecord(
+                        sceneId = rs.getLong("scene_id"),
+                        state = state,
+                        synopsis = rs.getString("synopsis"),
+                        extractedThrough = rs.longOrNull("extracted_through"),
+                        extractAttempts = rs.getInt("extract_attempts"),
+                        chunksDone = rs.getInt("chunks_done"),
+                        chunksFailed = rs.getInt("chunks_failed"),
+                        narrateAttempts = rs.getInt("narrate_attempts"),
+                    )
+                }
+            },
+            sceneCursors = rows("SELECT * FROM scene_cursor ORDER BY rowid") { rs ->
+                SceneCursorRecord(
+                    conversationId = rs.getString("conversation_id"),
+                    chatKey = rs.getString("chat_key"),
+                    segmentedThrough = rs.longOrNull("segmented_through"),
+                    segmentAttempts = rs.getInt("segment_attempts"),
+                    fallbackThrough = rs.longOrNull("fallback_through"),
+                    extractAttempts = rs.getInt("extract_attempts"),
+                    blockedSince = rs.getString("blocked_since")?.let(Instant::parse),
+                    finished = rs.getInt("finished") == 1,
+                )
+            },
             threads = rows("SELECT * FROM thread ORDER BY rowid") { rs ->
                 ThreadRecord(
                     id = rs.getLong("id"),
@@ -359,16 +394,49 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
         update(
             """
             INSERT INTO scene (scene_id, title, conversation_id, chat_key, first_message_id, last_message_id, date_from,
-                date_to, in_progress, hub_engram_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                date_to, in_progress, hub_engram_id, started_at, seq)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (scene_id) DO UPDATE SET
                 title = excluded.title, conversation_id = excluded.conversation_id, chat_key = excluded.chat_key,
                 first_message_id = excluded.first_message_id, last_message_id = excluded.last_message_id,
                 date_from = excluded.date_from, date_to = excluded.date_to, in_progress = excluded.in_progress,
-                hub_engram_id = excluded.hub_engram_id
+                hub_engram_id = excluded.hub_engram_id, started_at = excluded.started_at, seq = excluded.seq
             """,
             scene.sceneId, scene.title, scene.conversationId, scene.chatKey, scene.firstMessageId, scene.lastMessageId,
-            scene.dateFrom, scene.dateTo, scene.inProgress, scene.hubEngramId,
+            scene.dateFrom, scene.dateTo, scene.inProgress, scene.hubEngramId, scene.startedAt?.toString(), scene.seq,
+        )
+    }
+
+    override fun putSceneWork(work: SceneWorkRecord) = write {
+        update(
+            """
+            INSERT INTO scene_work (scene_id, state, synopsis, extracted_through, extract_attempts, chunks_done,
+                chunks_failed, narrate_attempts)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (scene_id) DO UPDATE SET
+                state = excluded.state, synopsis = excluded.synopsis, extracted_through = excluded.extracted_through,
+                extract_attempts = excluded.extract_attempts, chunks_done = excluded.chunks_done,
+                chunks_failed = excluded.chunks_failed, narrate_attempts = excluded.narrate_attempts
+            """,
+            work.sceneId, work.state.name, work.synopsis, work.extractedThrough, work.extractAttempts, work.chunksDone,
+            work.chunksFailed, work.narrateAttempts,
+        )
+    }
+
+    override fun putSceneCursor(cursor: SceneCursorRecord) = write {
+        update(
+            """
+            INSERT INTO scene_cursor (conversation_id, chat_key, segmented_through, segment_attempts, fallback_through,
+                extract_attempts, blocked_since, finished)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (conversation_id) DO UPDATE SET
+                chat_key = excluded.chat_key, segmented_through = excluded.segmented_through,
+                segment_attempts = excluded.segment_attempts, fallback_through = excluded.fallback_through,
+                extract_attempts = excluded.extract_attempts, blocked_since = excluded.blocked_since,
+                finished = excluded.finished
+            """,
+            cursor.conversationId, cursor.chatKey, cursor.segmentedThrough, cursor.segmentAttempts, cursor.fallbackThrough,
+            cursor.extractAttempts, cursor.blockedSince?.toString(), cursor.finished,
         )
     }
 

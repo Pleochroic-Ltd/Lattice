@@ -664,7 +664,7 @@ class LatticeGraph(
         resolvedEntityIds.addAll(loaded.resolvedEntityIds)
         // SCENE EPISODES: rehydrate the scene / thread side-store (empty unless the scene pipeline ran).
         sceneIndex.load(loaded)
-        // PERIODS: after the scenes, whose first message ids order the periods.
+        // PERIODS: after the scenes, whose order orders the periods.
         periodIndex.load(loaded)
         // Startup warning: episodic binding depends on the temporal layer. formEpisodes eligibility
         // needs a full YYYY-MM-DD (sub-day equality), but event_date is only ever PERSISTED while
@@ -2728,8 +2728,27 @@ class LatticeGraph(
 
     fun scenes(): List<SceneRecord> = sceneIndex.scenes()
 
-    /** The scenes of one chat (`channel:chatId`), in scene-id order — without copying every chat's scenes. */
+    /** The scenes of one chat, oldest first ([SCENE_ORDER]) — without copying every chat's scenes. */
     fun scenes(chatKey: String): List<SceneRecord> = sceneIndex.scenes(chatKey)
+
+    /** The [SceneRecord.seq] the chat's next captured scene takes. */
+    fun nextSceneSeq(chatKey: String): Long = sceneIndex.nextSceneSeq(chatKey)
+
+    /** The scene pipeline's work state of [sceneId], or null (a scene the pipeline didn't write). */
+    fun sceneWork(sceneId: Long): SceneWorkRecord? = sceneIndex.sceneWork(sceneId)
+
+    fun sceneCursor(conversationId: String): SceneCursorRecord? = sceneIndex.sceneCursor(conversationId)
+
+    fun sceneCursors(): List<SceneCursorRecord> = sceneIndex.sceneCursors()
+
+    /**
+     * Writes a scene's row, its work state and its conversation's cursor — whichever is given — as one store batch.
+     * The scene's hub, when set, must be a live engram, and a work state needs its scene.
+     */
+    fun putSceneState(scene: SceneRecord? = null, work: SceneWorkRecord? = null, cursor: SceneCursorRecord? = null) {
+        require(scene?.hubEngramId == null || scene.hubEngramId in nodes) { "unknown hub engram ${scene?.hubEngramId}" }
+        sceneIndex.putSceneState(scene, work, cursor)
+    }
 
     /** The scene whose hub is [hubEngramId], if any (the formatter's source for title, dates, in-progress). */
     fun sceneOfHub(hubEngramId: Long): SceneRecord? = sceneIndex.sceneOfHub(hubEngramId)
@@ -2751,7 +2770,7 @@ class LatticeGraph(
 
     fun thread(threadId: Long): ThreadRecord? = sceneIndex.thread(threadId)
 
-    /** Thread rows, optionally of one chat, in id order. */
+    /** Thread rows, optionally of one chat, oldest first: in the order of the scenes that opened them, then by id. */
     fun threads(chatKey: String? = null): List<ThreadRecord> = sceneIndex.threads(chatKey)
 
     fun threadLinks(threadId: Long): List<ThreadLinkRecord> = sceneIndex.threadLinks(threadId)
@@ -2808,13 +2827,13 @@ class LatticeGraph(
 
     fun period(periodId: Long): PeriodRecord? = periodIndex.period(periodId)
 
-    /** The chat's periods in chronological order (by their first scene's first message id). */
+    /** The chat's periods in chronological order (by their first scene, [SCENE_ORDER]). */
     fun periods(chatKey: String): List<PeriodRecord> = periodIndex.periods(chatKey)
 
     /** The period scene [sceneId] belongs to, if any. */
     fun periodOfScene(sceneId: Long): PeriodRecord? = periodIndex.periodOfScene(sceneId)
 
-    /** The member scene ids of [periodId], by first message id. */
+    /** The member scene ids of [periodId], in [SCENE_ORDER]. */
     fun periodScenes(periodId: Long): List<Long> = periodIndex.periodScenes(periodId)
 
     fun provisionalPeriod(chatKey: String): PeriodRecord? = periodIndex.provisionalPeriod(chatKey)
