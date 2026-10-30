@@ -99,4 +99,6 @@ Beyond `docs/API.md`:
   before. The client reads at most 64 MiB of an answer (64 KiB of a streamed answer's error).
 - A `404` to a post or to `/ops?since=` means the graph was deleted on the service. The client never creates it again
   under the deleted graph's ops: it moves its outbox and copy aside (`<name>.outbox.gone-<millis>.jsonl`), stops writing
-  and reports it; a new store (after a restart) starts a new, empty graph.
+  and reports it; a new store (after a restart) starts a new, empty graph. A store that opens to a `404` with writes in
+  its outbox but no create (the graph was deleted while the device was away) moves them and its copy aside the same way
+  first, so that they never meet the `404`.

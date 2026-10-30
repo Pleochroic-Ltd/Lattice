@@ -611,6 +611,7 @@ class PleochroicGraphStore(
         }
         devices.clear()
         if (info == null) {
+            if (!opened) setAsideDeleted()
             val create = queue.firstNotNullOfOrNull { it.entry as? OutboxEntry.Create }
             exists = create != null
             mirror = newMirror().also { it.reset(create?.spec) }
@@ -808,6 +809,21 @@ class PleochroicGraphStore(
             "stopped writing to it" + (aside?.let { " and moved its unsent writes to $it" } ?: "") +
             ". Restart to start a new, empty graph under this name, or restore the graph on Pleochroic first."
         logger.warn(goneReason)
+    }
+
+    /**
+     * At open, a graph missing from the service while the outbox holds writes for it but no create was deleted while
+     * this device was away: those writes and the copy go aside, so that a new, empty graph starts instead of the old
+     * writes meeting a `404`.
+     */
+    private fun setAsideDeleted() {
+        if (queue.isEmpty() || queue.any { it.entry is OutboxEntry.Create }) return
+        val aside = files.setAside(emptyList())
+        queue.clear()
+        logger.warn(
+            "Graph '{}' was deleted on Pleochroic while this device was away, so a new, empty graph starts; its unsent writes went to {}.",
+            graphName, aside,
+        )
     }
 
     // -- Device slot ----------------------------------------------------------

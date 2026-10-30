@@ -358,6 +358,30 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `a restart after the graph was deleted sets the old writes aside and starts a new graph`() {
+        val first = store().also { it.declareEmbedding(SPEC) }
+        first.putEngram(engram(1))
+        server.down = true
+        first.putEngram(engram(2))
+        first.close()
+        server.down = false
+        server.delete(GRAPH)
+
+        val second = store()
+        assertEquals(0, second.load().engrams.size)
+        assertEquals(0, second.pendingWrites)
+        assertNull(second.failure)
+        second.declareEmbedding(SPEC)
+        second.putEngram(engram(3))
+
+        assertNull(second.failure)
+        assertEquals(setOf(3L), server.graph(GRAPH)!!.engramIds)
+        val aside = Files.list(dir.resolve("a")).use { files -> files.toList() }
+            .single { it.fileName.toString().startsWith("$GRAPH.outbox.gone-") }
+        assertTrue("\"id\":2" in Files.readString(aside))
+    }
+
+    @Test
     fun `a pull that finds the graph deleted stops the store too`() {
         val store = store().also { it.declareEmbedding(SPEC) }
         store.putEngram(engram(1))
