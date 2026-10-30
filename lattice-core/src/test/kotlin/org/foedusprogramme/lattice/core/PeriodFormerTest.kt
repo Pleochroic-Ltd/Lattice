@@ -77,13 +77,13 @@ class PeriodFormerTest {
         r.scene("场景1")
         r.former().formChat(CHAT)
 
-        val expected = "## Language\n${PeriodFields.languageLabel(Language.ZH)}\n\n" +
+        val expected = "## Language\nSimplified Chinese\n\n" +
             "## Who is who\nYou — the assistant, written in the first person; also addressed as 云舒 (all of these are you)\n" +
             "The human counterpart: Ethan\n\n" +
             "## Names already used\n(none)\n\n" +
             "## New scenes\n[1] 2026-07-22\n"
         assertTrue(r.formation.calls.single().startsWith(expected), r.formation.calls.single())
-        assertEquals("Chinese", PeriodFields.languageLabel(Language.ZH))
+        assertEquals("Simplified Chinese", PeriodFields.languageLabel(Language.ZH), "the prompts' name for Chinese")
         assertEquals("English", PeriodFields.languageLabel(Language.EN))
         // Without a language, aliases or a user name; names normalized, blanks and repeats dropped.
         assertEquals(
