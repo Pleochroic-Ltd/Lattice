@@ -33,6 +33,7 @@ import org.unitedsoftware.alexandrite.sdk.transcript.UserOrigin
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -115,9 +116,10 @@ internal class RegisteredConversation(val agent: String, val chat: String, val c
 
 /**
  * The conversations the plugin has seen, per agent and chat, in the order it saw them, kept in [file] across restarts:
- * the SDK has no list of a chat's past conversations, which the scene catch-up needs.
+ * the SDK has no list of a chat's past conversations, which the scene catch-up needs. It keeps the latest [maxEntries];
+ * the oldest, long sealed and caught up, are forgotten.
  */
-internal class ConversationRegistry(private val file: Path) {
+internal class ConversationRegistry(private val file: Path, private val maxEntries: Int = MAX_CONVERSATIONS) {
     private val lock = Any()
     private var loaded: MutableList<RegisteredConversation>? = null
 
@@ -142,7 +144,17 @@ internal class ConversationRegistry(private val file: Path) {
             StandardOpenOption.APPEND,
         )
         entries += entry
+        if (entries.size > maxEntries) {
+            entries.subList(0, entries.size - maxEntries).clear()
+            rewrite(entries)
+        }
         entry
+    }
+
+    private fun rewrite(entries: List<RegisteredConversation>) {
+        val temp = file.resolveSibling("${file.fileName}.tmp")
+        Files.writeString(temp, entries.joinToString("") { Json.encodeToString(RegisteredConversation.serializer(), it) + "\n" })
+        Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
     }
 
     private fun all(): List<RegisteredConversation> = synchronized(lock) { entries().toList() }
@@ -326,5 +338,6 @@ internal class AlexandriteConversationSource(
 private fun List<*>.text(): String = filterIsInstance<TextPart>().joinToString("\n") { it.text }.trim()
 
 private const val SCENES_DIR = "scenes"
+private const val MAX_CONVERSATIONS = 20_000
 
 private val logger = LoggerFactory.getLogger(SceneHost::class.java)

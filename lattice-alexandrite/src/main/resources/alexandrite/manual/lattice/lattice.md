@@ -77,7 +77,9 @@ Lattice reads `plugins.lattice`:
   several devices: each pulls what the others wrote every `storage.pullSeconds` (300 by default) and before each sleep,
   and as soon as one of its own writes finds some, and then reloads its graph. A graph deleted on Pleochroic is not
   made again: the device logs it once as an error, stops writing to it and keeps its unsent writes aside in its state
-  directory; after a restart it starts a new, empty graph.
+  directory; after a restart it starts a new, empty graph. A key that Pleochroic refuses is logged once as an error;
+  writes wait on the device meanwhile, up to 200 000 operations or 128 MiB, past which later ones stay on the device
+  only until the backlog is sent, and are lost at a restart.
 - `embedder.kind`: `openai` for an OpenAI-compatible embeddings API (`baseUrl`, `model`, `apiKey`, `dimension`), or
   `pleochroic`. A graph keeps the embedding model it was made with.
 - `model.kind`: `host` for one of the host's model endpoints (`default` as `<endpoint>/<model>`, and `tasks` to give a

@@ -82,8 +82,9 @@ internal class GraphSync(
 
     /** Logs the store's failure once, when it has one. */
     private fun report() {
-        val why = failure() ?: return
-        if (why == reported) return
+        val why = failure()
+        if (why == null) reported = null
+        if (why == null || why == reported) return
         reported = why
         onFailure(why)
     }

@@ -83,6 +83,12 @@ class GraphSyncTest {
         sync.pull()
 
         assertEquals(listOf("Graph 'main' was deleted on Pleochroic."), reported)
+
+        failure = null
+        sync.pull()
+        failure = "Graph 'main' was deleted on Pleochroic."
+        sync.pull()
+        assertEquals(2, reported.size, "a failure that cleared and came back is reported again")
     }
 
     @Test

@@ -4,6 +4,7 @@ package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.serialization.json.Json
 import org.foedusprogramme.lattice.SceneTrustPolicy
+import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginFiles
 import org.unitedsoftware.alexandrite.testkit.MemoryStore
@@ -15,6 +16,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 /** What a graph's dependencies carry for scenes. */
 class BackendsTest {
@@ -65,6 +67,18 @@ class BackendsTest {
             "The host binds no transcript store to plugins, so scenes cannot be turned on",
             warning("{}", transcripts = false, conversations = true),
         )
+    }
+
+    @Test
+    fun `the dead letters are kept in two files at most`() {
+        val path = dir.resolve("dead-letters").resolve("main.jsonl")
+        val letters = RotatingDeadLetter(path, maxBytes = 2_000)
+        repeat(30) { letters.record(DeadLetterEntry("unparseable $it", "capture", null, null, "t".repeat(200), "r")) }
+
+        val kept = Files.list(path.parent).use { it.toList() }.map { it.fileName.toString() }.toSet()
+        assertEquals(setOf("main.jsonl", "main.jsonl.1"), kept)
+        assertTrue(Files.size(path) < 3_000 && Files.size(path.resolveSibling("main.jsonl.1")) < 3_000)
+        assertTrue("unparseable 29" in Files.readString(path))
     }
 
     @Test

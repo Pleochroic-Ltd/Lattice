@@ -168,6 +168,17 @@ class SceneSourceTest {
     }
 
     @Test
+    fun `the registry keeps the latest conversations, also across a restart`() {
+        val file = dir.resolve("capped.jsonl")
+        val capped = ConversationRegistry(file, maxEntries = 3)
+        (1..5).forEach { capped.add(RegisteredConversation("main", chatKey, "c$it")) }
+
+        assertEquals(listOf("c3", "c4", "c5"), capped.conversations(AgentId.MAIN, chatKey))
+        assertEquals(3, Files.readAllLines(file).size)
+        assertEquals(listOf("c3", "c4", "c5"), ConversationRegistry(file, maxEntries = 3).conversations(AgentId.MAIN, chatKey))
+    }
+
+    @Test
     fun `a read takes the range and the limit, and finds a tool call made before it`() {
         val search = ToolCallPart(ToolCallId("call-2"), "history.search", """{"query": "Berlin"}""")
         val first = append(said("one"), answer("", search), result(search, "found Berlin"))

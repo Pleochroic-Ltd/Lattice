@@ -3,9 +3,11 @@ package org.foedusprogramme.lattice.alexandrite
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.SceneTrustPolicy
 import org.foedusprogramme.lattice.core.BundledTexts
+import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.foedusprogramme.lattice.core.Embedder
 import org.foedusprogramme.lattice.core.FileMemoryDeadLetter
 import org.foedusprogramme.lattice.core.LatticeStore
+import org.foedusprogramme.lattice.core.MemoryDeadLetter
 import org.foedusprogramme.lattice.core.MemoryModel
 import org.foedusprogramme.lattice.core.MemoryTask
 import org.foedusprogramme.lattice.core.MemoryTexts
@@ -16,16 +18,19 @@ import org.foedusprogramme.lattice.remote.PleochroicEmbedder
 import org.foedusprogramme.lattice.remote.PleochroicGraphStore
 import org.foedusprogramme.lattice.remote.PleochroicMemoryModel
 import org.foedusprogramme.lattice.sqlite.SqliteLatticeStore
+import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.config.ConfigException
 import org.unitedsoftware.alexandrite.sdk.config.Secret
 import org.unitedsoftware.alexandrite.sdk.model.ModelEndpoint
 import org.unitedsoftware.alexandrite.sdk.model.ModelProvider
 import org.unitedsoftware.alexandrite.sdk.transcript.EndpointId
 import org.unitedsoftware.alexandrite.sdk.transcript.ModelRef
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
-import java.time.Duration
+import java.nio.file.StandardCopyOption
 import java.time.Clock
+import java.time.Duration
 import kotlin.io.path.isDirectory
 import kotlin.io.path.listDirectoryEntries
 import kotlin.io.path.name
@@ -83,7 +88,7 @@ internal class Backends(
                 model = model,
                 judgeModelId = judgeModelId(),
                 texts = texts(),
-                deadLetter = FileMemoryDeadLetter(dataDir.resolve("dead-letters").resolve("$graph.jsonl")),
+                deadLetter = RotatingDeadLetter(dataDir.resolve("dead-letters").resolve("$graph.jsonl")),
                 clock = clock,
                 conversations = scene?.source,
                 sceneTrust = scene?.trust ?: SceneTrustPolicy.Conservative,
@@ -205,3 +210,26 @@ internal fun openAiModelConfig(model: ModelConfig): OpenAiChatMemoryModel.Config
     maxTokens = model.maxOutputTokens,
     requestTimeout = model.timeout.toJavaDuration(),
 )
+
+/**
+ * The model answers that did not parse, in [path] by [FileMemoryDeadLetter]; once it holds [maxBytes] it becomes
+ * `<path>.1`, replacing the one before, so two files at most are kept.
+ */
+internal class RotatingDeadLetter(private val path: Path, private val maxBytes: Long = MAX_DEAD_LETTER_BYTES) : MemoryDeadLetter {
+    private val file = FileMemoryDeadLetter(path)
+
+    override fun record(entry: DeadLetterEntry) = synchronized(this) {
+        try {
+            if (Files.exists(path) && Files.size(path) >= maxBytes) {
+                Files.move(path, path.resolveSibling("${path.fileName}.1"), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: IOException) {
+            logger.warn("Cannot set the dead letters of {} aside, so they grow on", path, e)
+        }
+        file.record(entry)
+    }
+}
+
+private const val MAX_DEAD_LETTER_BYTES = 8L * 1024 * 1024
+
+private val logger = LoggerFactory.getLogger(Backends::class.java)
