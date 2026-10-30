@@ -5,13 +5,18 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.foedusprogramme.lattice.Lattice
 import org.foedusprogramme.lattice.LatticeDependencies
 import org.foedusprogramme.lattice.LatticeSettings
 import org.foedusprogramme.lattice.openLattice
+import org.foedusprogramme.lattice.reloadLattice
 import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.chat.AgentId
 import org.unitedsoftware.alexandrite.sdk.di.Inject
@@ -22,14 +27,24 @@ import org.unitedsoftware.alexandrite.sdk.plugin.PluginFiles
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginScope
 import java.time.Clock
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.CoroutineContext
+import kotlin.time.Duration
 
 /** Opens a graph: [openLattice] unless a test binds another. */
 internal fun interface LatticeOpener {
     fun open(name: String, settings: LatticeSettings, dependencies: LatticeDependencies): Lattice
+
+    /** Builds [lattice]'s graph again from its store. */
+    suspend fun reload(lattice: Lattice) {
+        reloadLattice(lattice)
+    }
 }
 
-/** One [Lattice] per agent, opened at its first use and closed when the plugin drains. */
+/**
+ * One [Lattice] per agent, opened at its first use and closed when the plugin drains. A graph whose store other devices
+ * write pulls their writes every [pullInterval] and reloads when some came in.
+ */
 @Singleton
 internal class LatticeGraphs internal constructor(
     private val backends: BackendFactory,
@@ -38,6 +53,7 @@ internal class LatticeGraphs internal constructor(
     private val scope: CoroutineScope,
     private val clock: Clock,
     private val io: CoroutineContext = Dispatchers.IO,
+    private val pullInterval: Duration? = null,
 ) : Lifecycle {
     @Inject
     constructor(
@@ -55,14 +71,32 @@ internal class LatticeGraphs internal constructor(
         config.settings(clock.zone),
         scope,
         clock,
+        pullInterval = config.storage.pullInterval,
     )
 
     private val lock = Mutex()
     private val graphs = LinkedHashMap<AgentId, Opening>()
     private var closed = false
+    private val syncs = ConcurrentHashMap<AgentId, GraphSync>()
+    private var puller: Job? = null
 
     override suspend fun onStart() {
         backends.validate()
+    }
+
+    override suspend fun onOpen() {
+        val interval = pullInterval ?: return
+        puller = scope.launch(io + CoroutineName("lattice-pull")) {
+            while (true) {
+                delay(interval)
+                for (agent in syncs.keys.toList()) pull(agent)
+            }
+        }
+    }
+
+    /** Pulls what other devices wrote into the open graph of [agent] and reloads it when some came in. */
+    suspend fun pull(agent: AgentId) {
+        syncs[agent]?.pull()
     }
 
     /**
@@ -86,6 +120,7 @@ internal class LatticeGraphs internal constructor(
     }
 
     override suspend fun onDrain() {
+        puller?.cancelAndJoin()
         val all = lock.withLock {
             closed = true
             graphs.toMap().also { graphs.clear() }
@@ -119,13 +154,16 @@ internal class LatticeGraphs internal constructor(
     }
 
     private fun open(agent: AgentId): Result<Lattice> = try {
-        val dependencies = backends.dependencies(agent.value)
+        val sync = GraphSync(agent.value, scope, io)
+        val dependencies = backends.dependencies(agent.value, sync)
         val lattice = try {
             opener.open(agent.value, settings, dependencies)
         } catch (e: Exception) {
             dependencies.store.close()
             throw e
         }
+        sync.bind { opener.reload(lattice) }
+        if (sync.remote) syncs[agent] = sync
         logger.info("Opened the memory of agent '{}'", agent)
         Result.success(lattice)
     } catch (e: CancellationException) {

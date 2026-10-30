@@ -203,8 +203,19 @@ class LatticeConfigTest {
         )
         assertContains(
             refused(config("""{"storage": {"kind": "local", "graphPrefix": "x-"}}""")),
-            "storage.graphPrefix is only read when storage.kind is \"pleochroic\"",
+            "storage.graphPrefix and storage.pullSeconds are only read when storage.kind is \"pleochroic\"",
         )
+        assertContains(
+            refused(config("""{"storage": {"kind": "local", "pullSeconds": 60}}""")),
+            "storage.graphPrefix and storage.pullSeconds are only read",
+        )
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        assertContains(
+            refused(config("""{"storage": {"kind": "pleochroic", "pullSeconds": 5}, $pleochroic}""")),
+            "storage.pullSeconds must be between 10 and 86400",
+        )
+        assertEquals(300.seconds, decode(config("""{"storage": {"kind": "pleochroic"}, $pleochroic}""")).storage.pullInterval)
+        assertNull(decode(BASE_CONFIG).storage.pullInterval)
     }
 
     @Test

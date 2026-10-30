@@ -171,12 +171,30 @@ internal class FakeOpener : LatticeOpener {
     }
 
     fun graph(name: String): FakeLattice = graphs.getOrPut(name) { FakeLattice(name) }
+
+    /** The graphs reloaded, in order. */
+    val reloads = MutableStateFlow<List<String>>(emptyList())
+
+    override suspend fun reload(lattice: Lattice) {
+        reloads.update { it + lattice.name }
+    }
 }
 
-/** Dependencies that need nothing outside the test. */
-internal class FakeBackends(private val stored: List<String> = emptyList()) : BackendFactory {
-    override fun dependencies(graph: String): LatticeDependencies =
-        LatticeDependencies(NoOpLatticeStore, LocalHashingEmbedder(), null, texts = KeyTexts)
+/** Dependencies that need nothing outside the test; a graph's store is remote when [pull] is set. */
+internal class FakeBackends(
+    private val stored: List<String> = emptyList(),
+    private val pull: ((String) -> Boolean)? = null,
+) : BackendFactory {
+    /** The sync of each graph opened, by graph name. */
+    val syncs = ConcurrentHashMap<String, GraphSync>()
+
+    override fun dependencies(graph: String, sync: GraphSync?): LatticeDependencies {
+        if (sync != null) {
+            syncs[graph] = sync
+            pull?.let { pull -> sync.attach { pull(graph) } }
+        }
+        return LatticeDependencies(NoOpLatticeStore, LocalHashingEmbedder(), null, texts = KeyTexts)
+    }
 
     override fun storedGraphs(): List<String> = stored
 }

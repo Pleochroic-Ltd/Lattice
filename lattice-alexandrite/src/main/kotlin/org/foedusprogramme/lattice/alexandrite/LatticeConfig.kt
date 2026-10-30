@@ -129,18 +129,28 @@ internal class StorageConfig(
     val kind: String = LOCAL,
     /** What a Pleochroic graph's name starts with, before the agent id. */
     val graphPrefix: String? = null,
+    /** How often a Pleochroic graph pulls what other devices wrote, 300 when null. */
+    val pullSeconds: Int? = null,
 ) {
     fun check() {
         require(kind == LOCAL || kind == PLEOCHROIC) { "storage.kind must be \"local\" or \"pleochroic\"." }
         if (kind == LOCAL) {
-            require(graphPrefix == null) {
-                "storage.graphPrefix is only read when storage.kind is \"pleochroic\": remove it."
+            require(graphPrefix == null && pullSeconds == null) {
+                "storage.graphPrefix and storage.pullSeconds are only read when storage.kind is \"pleochroic\": " +
+                    "remove them."
             }
+        }
+        require(pullSeconds == null || pullSeconds in MIN_PULL_SECONDS..MAX_PULL_SECONDS) {
+            "storage.pullSeconds must be between $MIN_PULL_SECONDS and $MAX_PULL_SECONDS."
         }
         require(graphPrefix == null || GRAPH_PREFIX.matches(graphPrefix)) {
             "storage.graphPrefix may hold only lowercase letters, digits and '-', such as \"home-\"."
         }
     }
+
+    /** How often a Pleochroic graph pulls other devices' writes, null for a local one. */
+    val pullInterval: Duration?
+        get() = if (kind == PLEOCHROIC) (pullSeconds ?: DEFAULT_PULL_SECONDS).seconds else null
 
     /** The name of [agent]'s graph where it is stored. */
     fun graphName(agent: String): String = (graphPrefix ?: "") + agent
@@ -454,6 +464,9 @@ private const val MAX_BATCH = 100
 private const val MAX_SEGMENT = 1000
 private const val MAX_LOOKAHEAD = 200
 private const val MIN_WINDOW = 10
+private const val DEFAULT_PULL_SECONDS = 300
+private const val MIN_PULL_SECONDS = 10
+private const val MAX_PULL_SECONDS = 86_400
 
 private val GRAPH_PREFIX = Regex("[a-z0-9-]*")
 

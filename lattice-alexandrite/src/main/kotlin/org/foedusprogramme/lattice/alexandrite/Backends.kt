@@ -31,8 +31,11 @@ import kotlin.io.path.name
 
 /** What each agent's graph runs on. */
 internal interface BackendFactory : AutoCloseable {
-    /** The store, embedder and model of the graph [graph], whose store the caller closes. */
-    fun dependencies(graph: String): LatticeDependencies
+    /**
+     * The store, embedder and model of the graph [graph], whose store the caller closes. A store that other devices
+     * write tells [sync] of their writes and lets it pull them.
+     */
+    fun dependencies(graph: String, sync: GraphSync? = null): LatticeDependencies
 
     /** The names of the graphs stored so far. */
     fun storedGraphs(): List<String>
@@ -68,8 +71,8 @@ internal class Backends(
 
     private val model: MemoryModel? by lazy { model(config.modelConfig) }
 
-    override fun dependencies(graph: String): LatticeDependencies {
-        val store = store(graph)
+    override fun dependencies(graph: String, sync: GraphSync?): LatticeDependencies {
+        val store = store(graph, sync)
         try {
             val scene = scenes?.forGraph(graph)
             return LatticeDependencies(
@@ -120,7 +123,7 @@ internal class Backends(
         hostModel?.shutDown()
     }
 
-    private fun store(graph: String): LatticeStore = when (config.storage.kind) {
+    private fun store(graph: String, sync: GraphSync?): LatticeStore = when (config.storage.kind) {
         LOCAL -> {
             Files.createDirectories(dataDir.resolve(GRAPHS))
             sqliteStore(dataDir.resolve(GRAPHS).resolve("$graph.db"))
@@ -128,7 +131,7 @@ internal class Backends(
 
         else -> {
             val state = Files.createDirectories(dataDir.resolve(PLEOCHROIC_STATE).resolve(graph))
-            pleochroicStore(config.storage.graphName(graph), state)
+            pleochroicStore(config.storage.graphName(graph), state, sync)
         }
     }
 
@@ -159,8 +162,9 @@ internal class Backends(
 
     private fun sqliteStore(path: Path): LatticeStore = SqliteLatticeStore(path)
 
-    private fun pleochroicStore(graphName: String, stateDir: Path): LatticeStore =
-        PleochroicGraphStore(pleochroicClient, graphName, stateDir)
+    private fun pleochroicStore(graphName: String, stateDir: Path, sync: GraphSync?): LatticeStore =
+        PleochroicGraphStore(pleochroicClient, graphName, stateDir, onRemoteChange = { sync?.changed() })
+            .also { store -> sync?.attach { !store.pullRemoteChanges().isEmpty } }
 
     private fun openAiEmbedder(baseUrl: String, model: String, apiKey: Secret?, dimension: Int): Embedder =
         OpenAiEmbedder(OpenAiEmbedder.Config(baseUrl, model, apiKey?.reveal(), expectedDimension = dimension))

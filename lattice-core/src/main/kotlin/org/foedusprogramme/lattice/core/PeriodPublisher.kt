@@ -43,6 +43,11 @@ class PeriodPublisher(private val graph: GraphAccess) {
         logger.info("Period catalogue withdrawn for this run chat={}", chatKey)
     }
 
+    /** Seeds [published] again from [g]'s stored catalogues, once the graph was built again from its store; graph thread. */
+    internal fun reseed(g: LatticeGraph) {
+        texts.set(g.catalogueSnapshots().associate { (it.chatKey to it.language) to it.text })
+    }
+
     /**
      * Build and commit one period-layer write on the graph thread. [build] runs there: it may re-check the state the
      * write was computed from and allocate ids, and returns null to abort (nothing written). The write goes to the store
