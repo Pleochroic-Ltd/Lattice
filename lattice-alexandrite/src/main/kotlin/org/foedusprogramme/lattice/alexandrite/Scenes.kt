@@ -10,6 +10,7 @@ import org.foedusprogramme.lattice.ConversationSource
 import org.foedusprogramme.lattice.SceneTrustPolicy
 import org.slf4j.LoggerFactory
 import org.unitedsoftware.alexandrite.sdk.chat.AgentId
+import org.unitedsoftware.alexandrite.sdk.chat.ChatUser
 import org.unitedsoftware.alexandrite.sdk.chat.ConversationId
 import org.unitedsoftware.alexandrite.sdk.chat.ToolCallId
 import org.unitedsoftware.alexandrite.sdk.chat.TurnId
@@ -52,6 +53,7 @@ internal class SceneHost(
     files: PluginFiles,
     private val transcripts: TranscriptStore?,
     private val conversations: ConversationStore?,
+    private val access: MemoryAccess,
 ) : Lifecycle {
     private val scenes = config.scenes
     val registry = ConversationRegistry(files.dataDir.resolve(SCENES_DIR).resolve("conversations.jsonl"))
@@ -91,7 +93,7 @@ internal class SceneHost(
         }
         val senders = SenderTrust()
         return SceneDependencies(
-            AlexandriteConversationSource(agent, transcripts!!, conversations!!, registry, senders),
+            AlexandriteConversationSource(agent, transcripts!!, conversations!!, registry, senders, access),
             AlexandriteSceneTrustPolicy(scenes, toolRisks, senders),
         )
     }
@@ -198,6 +200,12 @@ internal class SenderTrust {
  * The conversations of [agent] as scenes read them: the user-lane conversations the plugin has seen
  * ([ConversationRegistry]), their entries from [transcripts] at positions that are their entry ids, and their seals and
  * taints from [conversations]. Lattice calls it from its own threads, so each call blocks on the stores.
+ *
+ * Only turns that [access] admits are read: a turn whose every chat sender it admits, and a turn with no chat sender (a
+ * reminder, a turn a plugin started) only at [EVERYONE]. The rest of a turn goes with its sender's message, the
+ * agent's answer included, so that what someone below the level said is neither cut into scenes, extracted nor
+ * narrated, not even as the agent repeated it. The gap it leaves still counts: each such turn reads as one empty host
+ * message from [WITHHELD_SOURCE], which no scene trusts and which is tainted when someone below the level wrote in it.
  */
 internal class AlexandriteConversationSource(
     private val agent: AgentId,
@@ -205,6 +213,7 @@ internal class AlexandriteConversationSource(
     private val conversations: ConversationStore,
     private val registry: ConversationRegistry,
     private val senders: SenderTrust,
+    private val access: MemoryAccess,
 ) : ConversationSource {
     override fun chats(): List<String> = registry.chats(agent)
 
@@ -231,6 +240,8 @@ internal class AlexandriteConversationSource(
             val taintedFrom = conversations.taint(id)?.at
             val entries = if (from <= 1) transcripts.entries(id) else transcripts.entriesAfter(id, EntryId(from - 1))
             val calls = Calls()
+            val admitted = Admitted(entries, straddles = from > 1)
+            val withheld = HashSet<TurnId>()
             val messages = ArrayList<ConversationMessage>()
             for (entry in entries) {
                 val record = entry.record ?: continue
@@ -238,6 +249,10 @@ internal class AlexandriteConversationSource(
                 val position = record.id.value
                 if (position < from) continue
                 if (position > to || messages.size >= limit) break
+                if (!admitted(record.turn)) {
+                    if (withheld.add(record.turn)) messages += withheld(record, taintedFrom, admitted.spoken(record.turn))
+                    continue
+                }
                 messages += message(entry, record, chatKey, taintedFrom, calls) ?: continue
             }
             messages
@@ -303,6 +318,16 @@ internal class AlexandriteConversationSource(
         }
     }
 
+    /** A turn left out, as the empty host message that stands in for it; [spoken] = someone below the level wrote in it. */
+    private fun withheld(record: EntryRecord, taintedFrom: Instant?, spoken: Boolean) = ConversationMessage(
+        record.id.value,
+        ConversationMessage.Role.HOST,
+        "",
+        record.createdAt,
+        senderId = WITHHELD_SOURCE,
+        tainted = spoken || (taintedFrom != null && !record.createdAt.isBefore(taintedFrom)),
+    )
+
     private fun host(entry: UserEntry, record: EntryRecord, source: String?, tainted: Boolean) = ConversationMessage(
         record.id.value,
         ConversationMessage.Role.HOST,
@@ -311,6 +336,40 @@ internal class AlexandriteConversationSource(
         senderId = source,
         tainted = tainted,
     )
+
+    /**
+     * Whether [access] admits each turn of [entries], which run to the end of the conversation. Only the first turn can
+     * have begun before them, when the read [straddles] a start; its own entries are read for its senders.
+     */
+    private inner class Admitted(entries: List<TranscriptEntry>, straddles: Boolean) {
+        private val senders = HashMap<TurnId, MutableList<ChatUser>>()
+        private val first = entries.firstOrNull()?.record?.turn?.takeIf { straddles }
+        private val verdicts = HashMap<TurnId, Boolean>()
+
+        init {
+            if (access.level != EVERYONE) entries.forEach(::add)
+        }
+
+        private fun add(entry: TranscriptEntry) {
+            val turn = entry.record?.turn ?: return
+            val origin = (entry as? UserEntry)?.origin as? UserOrigin.FromChat ?: return
+            senders.getOrPut(turn) { ArrayList() } += origin.sender
+        }
+
+        /** Whether a chat sender wrote in [turn], which must have been asked about. */
+        fun spoken(turn: TurnId): Boolean = senders[turn].orEmpty().isNotEmpty()
+
+        suspend operator fun invoke(turn: TurnId): Boolean {
+            if (access.level == EVERYONE) return true
+            verdicts[turn]?.let { return it }
+            if (turn == first) {
+                senders -= turn
+                transcripts.turnEntries(turn).forEach(::add)
+            }
+            val users = senders[turn].orEmpty()
+            return (users.isNotEmpty() && users.all { access.admits(it) }).also { verdicts[turn] = it }
+        }
+    }
 
     /** The tool calls seen so far, and those of a turn whose call came before the entries read. */
     private inner class Calls {
@@ -328,9 +387,12 @@ internal class AlexandriteConversationSource(
         }
     }
 
-    private companion object {
+    companion object {
         /** The source of a turn a plugin started: `plugin:<plugin id>`. */
-        const val PLUGIN_SOURCE = "plugin:"
+        private const val PLUGIN_SOURCE = "plugin:"
+
+        /** The source of the host message that stands in for a turn below the access level. */
+        const val WITHHELD_SOURCE: String = "lattice.withheld"
     }
 }
 

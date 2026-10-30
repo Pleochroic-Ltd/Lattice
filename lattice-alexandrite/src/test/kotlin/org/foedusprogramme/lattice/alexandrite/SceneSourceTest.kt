@@ -3,6 +3,7 @@
 package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
 import org.foedusprogramme.lattice.ConversationMessage.Role
 import org.unitedsoftware.alexandrite.sdk.InternalAlexandriteApi
 import org.unitedsoftware.alexandrite.sdk.chat.AgentChatKey
@@ -60,8 +61,12 @@ class SceneSourceTest {
     private val dir = Files.createTempDirectory("lattice-scenes")
     private val registry = ConversationRegistry(dir.resolve("conversations.jsonl"))
     private val senders = SenderTrust()
-    private val source = AlexandriteConversationSource(
+    private val source = source(EVERYONE)
+
+    /** The source as a graph at the access [level] reads it. */
+    private fun source(level: String) = AlexandriteConversationSource(
         AgentId.MAIN, store.transcripts, store.conversations, registry, senders,
+        MemoryAccess(Json.decodeFromString(LatticeConfig.serializer(), withAccess(level))),
     )
     private val key = AgentChatKey(AgentId.MAIN, testChat())
     private val chatKey = testChat().toString()
@@ -165,6 +170,44 @@ class SceneSourceTest {
             listOf("from the owner" to false, "from a trusted user" to true, "from a guest" to true),
             messages().map { it.text to it.tainted },
         )
+    }
+
+    @Test
+    fun `a turn below the access level is not read, the agent's answer in it included, and its gap is untrusted`() {
+        val plan = append(said("plan the trip", OPERATOR), answer("Sure."))
+        val guest = append(said("the owner's PIN is 1234"), answer("Noted, your PIN is 1234."))
+        val trusted = append(said("hi", testUser("tess", isTrusted = true)), answer("Hello, Tess."))
+        val mixed = append(said("me too", OPERATOR), said("and me"), answer("Both noted."))
+        val reminder = append(
+            UserEntry(null, listOf(TextPart("Time to stretch")), UserOrigin.Initiated("reminders", TurnKind.REMINDER)),
+            answer("Stretch now."),
+        )
+        val hotel = append(said("and the hotel?", OPERATOR), answer("Booked."))
+
+        fun read(level: String, from: Long = Long.MIN_VALUE) =
+            source(level).messages(current().value, from, Long.MAX_VALUE, Int.MAX_VALUE)
+        fun gap(turn: List<TranscriptEntry>, tainted: Boolean = true) =
+            Triple(turn.positions.first(), "", tainted)
+        fun List<org.foedusprogramme.lattice.ConversationMessage>.shown() = map {
+            if (it.senderId == AlexandriteConversationSource.WITHHELD_SOURCE) Triple(it.position, it.text, it.tainted)
+            else Triple(it.position, it.text, null)
+        }
+        fun said(turn: List<TranscriptEntry>) = read(EVERYONE).filter { it.position in turn.positions }.map { Triple(it.position, it.text, null) }
+
+        val operators = read(OPERATORS)
+        assertEquals(
+            said(plan) + gap(guest) + gap(trusted) + gap(mixed) + gap(reminder, tainted = false) + said(hotel),
+            operators.shown(),
+        )
+        assertTrue(operators.filter { it.text.isEmpty() }.all { it.role == Role.HOST && !it.said })
+        assertEquals(said(plan) + gap(guest) + said(trusted) + gap(mixed) + gap(reminder, tainted = false) + said(hotel), read(TRUSTED).shown())
+        assertEquals((plan + guest + trusted + mixed + reminder + hotel).positions, read(EVERYONE).map { it.position })
+        assertEquals(
+            listOf(Triple(guest.positions.last(), "", true)) + gap(trusted) + gap(mixed) + gap(reminder, tainted = false) + said(hotel),
+            read(OPERATORS, from = guest.positions.last()).shown(),
+            "a turn begun before the read",
+        )
+        assertFalse(senders.trusted(chatKey, testUser().address.toString()), "a sender left out is never seen")
     }
 
     @Test

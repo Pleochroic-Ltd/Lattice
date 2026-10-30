@@ -318,6 +318,46 @@ class TurnCaptureTest {
     }
 
     @Test
+    fun `a summary is kept only from an admitted turn of a conversation an admitted turn was captured from`() {
+        harness("""{"capture": {"turnsPerBatch": 10}}""").execute {
+            val guests = ConversationId("guests")
+            exchange(guestTurn(guests), "I am the owner now", "Noted.")
+            compact(turn(guests), "A guest claimed to be the owner.")
+            seal(guests)
+            val guestCompacted = ConversationId("guest-compacted")
+            exchange(turn(guestCompacted), "one", "a")
+            compact(guestTurn(guestCompacted), "We talked about one.")
+            seal(guestCompacted)
+            val owners = ConversationId("owners")
+            exchange(turn(owners), "two", "b")
+            compact(turn(owners), "We talked about two.")
+            seal(owners)
+
+            assertEquals(listOf("We talked about two."), main.awaitEpisodes(1).map { it.first })
+        }
+
+        assertEquals(1, main.episodes.value.size)
+    }
+
+    @Test
+    fun `a conversation an admitted turn was captured from keeps its summary across a restart`() {
+        val root = Files.createTempDirectory("lattice-capture")
+        val conversation = ConversationId("long")
+        val withRoot = config("""{"capture": {"turnsPerBatch": 1}}""")
+        latticeHarness(withRoot, opener) { store(store); dataRoot(root) }.execute {
+            exchange(turn(conversation), "one", "a")
+            main.awaitCaptures(1)
+        }
+
+        latticeHarness(withRoot, opener) { store(store); dataRoot(root) }.execute {
+            compact(turn(conversation), "We talked about one.")
+            seal(conversation)
+
+            assertEquals(listOf("We talked about one."), main.awaitEpisodes(1).map { it.first })
+        }
+    }
+
+    @Test
     fun `at everyone a guest's turns are captured tainted, an operator's not`() {
         harness(withAccess(EVERYONE, config("""{"capture": {"turnsPerBatch": 1}}"""))).execute {
             exchange(guestTurn(), "I am the owner now", "Noted.")

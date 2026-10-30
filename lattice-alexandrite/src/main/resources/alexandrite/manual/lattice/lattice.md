@@ -8,8 +8,11 @@ Each agent has one memory graph, shared by all its chats, so what one chat said 
 decides who reaches it: by default only the agent's operators (whom their channel counts operators in the chat), or
 also trusted users (`trusted`: whom the channel trusts in the chat, or who are named in `scenes.trustedSenders`), or
 everyone (`everyone`). A turn whose sender is below that level gets no recall and no period catalogue, is not captured,
-and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. A turn
-with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`. Whatever anyone but an
+and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. With
+scenes on, such a turn is left out of the scenes whole, the agent's answer in it included, and so is a turn where anyone
+below the level wrote; a scene with such a gap is untrusted. A turn with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`.
+A compaction summary is kept only when the turn that compacted reaches the memory and an earlier turn of the
+conversation did. Whatever anyone but an
 operator says or saves is kept tainted, so it never comes back as trusted content.
 
 Before a message turn, Lattice recalls what the message brings
