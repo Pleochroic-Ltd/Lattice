@@ -16,12 +16,25 @@ import kotlin.coroutines.CoroutineContext
  * while writing ([changed]) and those a [pull] asks for end in a reload of the graph from its store. Built before the
  * graph, whose store needs [changed] as its callback, and bound to the graph once it opened.
  */
-internal class GraphSync(private val graph: String, private val scope: CoroutineScope, private val io: CoroutineContext) {
+internal class GraphSync(
+    private val graph: String,
+    private val scope: CoroutineScope,
+    private val io: CoroutineContext,
+    private val onFailure: (String) -> Unit = { why ->
+        logger.error("The memory of agent '{}' stopped writing to its store: {}", graph, why)
+    },
+) {
     @Volatile
     private var puller: (() -> Boolean)? = null
 
     @Volatile
     private var reloader: (suspend () -> Unit)? = null
+
+    @Volatile
+    private var failure: () -> String? = { null }
+
+    @Volatile
+    private var reported: String? = null
 
     private val stale = AtomicBoolean(false)
     private val lock = Mutex()
@@ -29,9 +42,13 @@ internal class GraphSync(private val graph: String, private val scope: Coroutine
     /** Whether other devices write the graph's store. */
     val remote: Boolean get() = puller != null
 
-    /** The store's pull, true when other devices' writes came in; set by the backend that built the store. */
-    fun attach(pull: () -> Boolean) {
+    /**
+     * The store's [failure], why it stopped writing, and its [pull], true when other devices' writes came in; set by the
+     * backend that built the store.
+     */
+    fun attach(failure: () -> String? = { null }, pull: () -> Boolean) {
         puller = pull
+        this.failure = failure
     }
 
     /** The graph opened: [reload] builds it again from its store. */
@@ -44,6 +61,7 @@ internal class GraphSync(private val graph: String, private val scope: Coroutine
     fun changed() {
         stale.set(true)
         schedule()
+        report()
     }
 
     /** Pulls other devices' writes and reloads the graph when some came in; a failure is logged. */
@@ -56,8 +74,18 @@ internal class GraphSync(private val graph: String, private val scope: Coroutine
         } catch (e: Exception) {
             logger.warn("Cannot pull other devices' writes into the memory of agent '{}'", graph, e)
             return
+        } finally {
+            report()
         }
         reloadIfStale()
+    }
+
+    /** Logs the store's failure once, when it has one. */
+    private fun report() {
+        val why = failure() ?: return
+        if (why == reported) return
+        reported = why
+        onFailure(why)
     }
 
     private fun schedule() {

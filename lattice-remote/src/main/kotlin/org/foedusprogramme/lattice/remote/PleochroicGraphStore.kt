@@ -53,7 +53,9 @@ import kotlin.concurrent.withLock
  * into the mirror, this device's pending ops are put back on top (last writer wins per row), and the post is retried.
  * A write the service can't take now (no network, `429`, `5xx`) goes to a durable outbox in [stateDir] and is sent,
  * in order, before the next write or by [flush]; such failures never reach the caller, and writes back off while the
- * service is down. A post refused as malformed (`400`, `413`) is set aside in `<name>.rejected.jsonl`.
+ * service is down. A post refused as malformed (`400`, `413`) is set aside in `<name>.rejected.jsonl`. A graph that is
+ * gone from the service (`404` to a post or a pull) was deleted there: the store moves its outbox and copy aside, stops
+ * writing and says why in [failure]; it never creates the graph again under the deleted one's ops.
  *
  * **Other devices' writes** reach the mirror on a conflict, on [pullRemoteChanges] and on a later [load]. Those
  * found during a write or [flush] are told to [onRemoteChange] after the call returns, on the calling thread; the
@@ -119,6 +121,12 @@ class PleochroicGraphStore(
     private var retryDelay: Duration = options.minRetryDelay
     private var notice = RemoteChanges.NONE
     private var pulling = false
+    private var gone = false
+
+    /** Why this store stopped writing to Pleochroic, null while it writes. */
+    @Volatile
+    var failure: String? = null
+        private set
 
     private class Queued(val entry: OutboxEntry, var persisted: Boolean)
 
@@ -128,6 +136,8 @@ class PleochroicGraphStore(
         data class Rejected(val reason: String) : Outcome
 
         data class Retry(val after: Duration?, val reason: String) : Outcome
+
+        data object Gone : Outcome
     }
 
     private class SnapshotRequired : RuntimeException()
@@ -303,7 +313,7 @@ class PleochroicGraphStore(
     private fun takeCollected(): List<Change> = collected.toList().also { collected.clear() }
 
     private fun submit(changes: List<Change>) {
-        if (changes.isEmpty()) return
+        if (changes.isEmpty() || gone) return
         val chunks = chunk(changes.map(GraphWire::encode))
         if (chunks.size > 1) {
             logger.warn(
@@ -336,6 +346,7 @@ class PleochroicGraphStore(
 
     /** Sends the queue in order and says whether it emptied; a failure keeps the rest in the outbox, never throws. */
     private fun flushQueue(force: Boolean): Boolean {
+        if (gone) return false
         if (queue.isEmpty()) return true
         if (!force && retryAt?.isAfter(Instant.now()) == true) {
             persistQueue()
@@ -366,6 +377,12 @@ class PleochroicGraphStore(
                         persistQueue()
                         return false
                     }
+                    Outcome.Gone -> {
+                        if (rewrite) files.rewriteOutbox(queue.filter { it.persisted }.map { it.entry })
+                        rewrite = false
+                        markGone()
+                        return false
+                    }
                 }
                 queue.removeFirst()
                 if (head.persisted) rewrite = true
@@ -379,6 +396,7 @@ class PleochroicGraphStore(
     }
 
     private fun persistQueue() {
+        if (gone) return
         val fresh = queue.filter { !it.persisted }
         if (fresh.isEmpty()) return
         files.appendOutbox(fresh.map { it.entry })
@@ -426,7 +444,6 @@ class PleochroicGraphStore(
 
     private fun post(ops: List<JsonObject>): Outcome {
         var conflicts = 0
-        var created = false
         while (true) {
             try {
                 val answer = client.call("POST", "/graphs/$graphName/ops", envelope(ops)) as? JsonObject
@@ -438,13 +455,7 @@ class PleochroicGraphStore(
                         if (++conflicts > options.maxConflictRetries) return Outcome.Retry(null, "the graph kept changing under $conflicts posts")
                         sync()
                     }
-                    e.status == 404 && !created -> {
-                        val spec = mirror.embedding ?: return Outcome.Retry(null, "graph '$graphName' is gone and has no embedding to recreate it with")
-                        logger.warn("Graph '{}' is gone from Pleochroic; this device recreates it.", graphName)
-                        val outcome = create(spec)
-                        if (outcome != Outcome.Sent) return outcome
-                        created = true
-                    }
+                    e.status == 404 -> return Outcome.Gone
                     else -> return classify(e)
                 }
             }
@@ -491,6 +502,10 @@ class PleochroicGraphStore(
     /** Loads the whole graph again: its info, the snapshot and the ops after it, then this device's pending writes. */
     private fun reload() {
         val info = info()
+        if (info == null && opened && exists) {
+            markGone()
+            return
+        }
         devices.clear()
         if (info == null) {
             val create = queue.firstNotNullOfOrNull { it.entry as? OutboxEntry.Create }
@@ -546,6 +561,7 @@ class PleochroicGraphStore(
 
     /** Pulls other devices' writes into the mirror; when the log no longer reaches back far enough, reloads it all. */
     private fun sync() {
+        if (gone) return
         val touched = try {
             pullPages()
         } catch (e: SnapshotRequired) {
@@ -570,7 +586,10 @@ class PleochroicGraphStore(
                 client.call("GET", "/graphs/$graphName/ops?since=$seq&limit=${options.pageLimit}") as? JsonObject
             } catch (e: PleochroicApiException) {
                 if (e.status == 410 || e.code == "snapshot_required") throw SnapshotRequired()
-                if (e.status == 404) return touched
+                if (e.status == 404) {
+                    if (opened) markGone()
+                    return touched
+                }
                 throw e
             } ?: return touched
             val ops = (page["ops"] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
@@ -621,8 +640,24 @@ class PleochroicGraphStore(
     }
 
     private fun writeCache() {
+        if (gone) return
         val rows = mirror.rows().asSequence().map { GraphWire.encode(Change(it, removed = false)) }
         files.writeSnapshot(seq, mirror.embedding, rows + devices.values.asSequence().map(GraphWire::putDevice))
+    }
+
+    /**
+     * The graph was deleted on the service: its outbox (with the writes not saved yet) and copy go aside, and the store
+     * writes no more, so that the deleted graph's ops never come back as a fragment of a new one.
+     */
+    private fun markGone() {
+        if (gone) return
+        val aside = files.setAside(queue.filter { !it.persisted }.map { it.entry })
+        queue.clear()
+        gone = true
+        failure = "Graph '$graphName' was deleted on Pleochroic, so the memory kept there is wiped; this device " +
+            "stopped writing to it" + (aside?.let { " and moved its unsent writes to $it" } ?: "") +
+            ". Restart to start a new, empty graph under this name, or restore the graph on Pleochroic first."
+        logger.warn(failure)
     }
 
     // -- Device slot ----------------------------------------------------------

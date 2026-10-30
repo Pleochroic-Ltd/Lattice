@@ -112,6 +112,9 @@ class FakePleochroicServer(val token: String = "test-key", private val dimension
 
     fun graph(name: String): Graph? = synchronized(this) { graphs[name] }
 
+    /** Deletes the graph [name], as its owner can on the service. */
+    fun delete(name: String) = synchronized(this) { graphs.remove(name) }
+
     /** Drops every op logged so far, as compaction past the retention would. */
     fun compact(name: String) = synchronized(this) {
         val g = graphs.getValue(name)

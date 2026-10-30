@@ -164,7 +164,7 @@ internal class Backends(
 
     private fun pleochroicStore(graphName: String, stateDir: Path, sync: GraphSync?): LatticeStore =
         PleochroicGraphStore(pleochroicClient, graphName, stateDir, onRemoteChange = { sync?.changed() })
-            .also { store -> sync?.attach { !store.pullRemoteChanges().isEmpty } }
+            .also { store -> sync?.attach({ store.failure }) { !store.pullRemoteChanges().isEmpty } }
 
     private fun openAiEmbedder(baseUrl: String, model: String, apiKey: Secret?, dimension: Int): Embedder =
         OpenAiEmbedder(OpenAiEmbedder.Config(baseUrl, model, apiKey?.reveal(), expectedDimension = dimension))

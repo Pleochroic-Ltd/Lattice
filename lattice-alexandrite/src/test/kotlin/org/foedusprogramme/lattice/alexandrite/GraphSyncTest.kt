@@ -70,6 +70,22 @@ class GraphSyncTest {
     }
 
     @Test
+    fun `a store that stopped writing is reported once`() = runTest {
+        val reported = CopyOnWriteArrayList<String>()
+        var failure: String? = null
+        val sync = GraphSync("main", backgroundScope, EmptyCoroutineContext) { reported += it }
+        sync.attach({ failure }) { false }
+
+        sync.pull()
+        failure = "Graph 'main' was deleted on Pleochroic."
+        sync.pull()
+        sync.changed()
+        sync.pull()
+
+        assertEquals(listOf("Graph 'main' was deleted on Pleochroic."), reported)
+    }
+
+    @Test
     fun `an open remote graph pulls on its timer and before each sleep, a local one never`() = runTest {
         val pulls = CopyOnWriteArrayList<String>()
         val opener = FakeOpener()

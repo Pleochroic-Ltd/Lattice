@@ -15,6 +15,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
+import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -244,6 +245,47 @@ class PleochroicGraphStoreTest {
         assertEquals(setOf(1L, 2L), b.load().engrams.map { it.id }.toSet())
         b.putEngram(engram(3))
         assertEquals(setOf(1L, 2L, 3L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
+    fun `a graph deleted on the service is not created again, and its unsent writes are moved aside`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.down = true
+        store.putEngram(engram(2))
+        server.down = false
+        server.delete(GRAPH)
+        store.putEngram(engram(3))
+
+        assertFalse(store.flush())
+
+        assertNull(server.graph(GRAPH), "the deleted graph is not created again")
+        assertContains(store.failure.orEmpty(), "was deleted on Pleochroic")
+        assertEquals(0, store.pendingWrites)
+        assertFalse(Files.exists(dir.resolve("a/$GRAPH.outbox.jsonl")))
+        val aside = Files.list(dir.resolve("a")).use { files -> files.toList() }
+            .single { it.fileName.toString().startsWith("$GRAPH.outbox.gone-") }
+        val kept = Files.readString(aside)
+        assertTrue("\"id\":2" in kept && "\"id\":3" in kept, kept)
+
+        val before = server.requests.size
+        store.putEngram(engram(4))
+        store.close()
+        assertEquals(before, server.requests.size, "a store whose graph is gone writes no more")
+        assertFalse(Files.exists(dir.resolve("a/$GRAPH.snapshot.ndjson")))
+    }
+
+    @Test
+    fun `a pull that finds the graph deleted stops the store too`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        store.putEngram(engram(1))
+        server.delete(GRAPH)
+
+        store.pullRemoteChanges()
+
+        assertContains(store.failure.orEmpty(), "was deleted on Pleochroic")
+        store.putEngram(engram(2))
+        assertNull(server.graph(GRAPH))
     }
 
     @Test

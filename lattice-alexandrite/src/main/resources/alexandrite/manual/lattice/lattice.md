@@ -74,7 +74,9 @@ Lattice reads `plugins.lattice`:
 - `storage.kind`: `local` keeps each agent's graph in a SQLite file in the plugin's data directory; `pleochroic` keeps
   it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>`. A Pleochroic graph can be shared by
   several devices: each pulls what the others wrote every `storage.pullSeconds` (300 by default) and before each sleep,
-  and as soon as one of its own writes finds some, and then reloads its graph.
+  and as soon as one of its own writes finds some, and then reloads its graph. A graph deleted on Pleochroic is not
+  made again: the device logs it once as an error, stops writing to it and keeps its unsent writes aside in its state
+  directory; after a restart it starts a new, empty graph.
 - `embedder.kind`: `openai` for an OpenAI-compatible embeddings API (`baseUrl`, `model`, `apiKey`, `dimension`), or
   `pleochroic`. A graph keeps the embedding model it was made with.
 - `model.kind`: `host` for one of the host's model endpoints (`default` as `<endpoint>/<model>`, and `tasks` to give a

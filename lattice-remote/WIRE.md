@@ -91,4 +91,7 @@ Beyond `docs/API.md`:
 - `POST /graphs` answers `409 conflict` when the graph exists. `GET /graphs/:name` carries `embedding`.
 - `putEngram` with an embedding of another dimension than the graph's is `400`. A `400` or `413` on a post means the
   post itself is bad: the client sets it aside (`<name>.rejected.jsonl`) and goes on. Any other failure (`401`, `402`,
-  `403`, `429`, `5xx`, no connection) keeps it in the outbox for later.
+  `403`, `429`, `5xx`, no connection) keeps it in the outbox for later, except `404`.
+- A `404` to a post or to `/ops?since=` means the graph was deleted on the service. The client never creates it again
+  under the deleted graph's ops: it moves its outbox and copy aside (`<name>.outbox.gone-<millis>.jsonl`), stops writing
+  and reports it; a new store (after a restart) starts a new, empty graph.

@@ -37,7 +37,7 @@ internal class CachedSnapshot(val seq: Long, val spec: EmbeddingSpec?, val ops: 
  * (the graph as last seen, for opening without the network). Every rewrite goes through a temporary file and an
  * atomic move.
  */
-internal class GraphStateFiles(dir: Path, name: String) {
+internal class GraphStateFiles(dir: Path, private val name: String) {
     private val logger = LoggerFactory.getLogger(GraphStateFiles::class.java)
     private val device = dir.resolve("$name.device.json")
     private val outbox = dir.resolve("$name.outbox.jsonl")
@@ -100,6 +100,23 @@ internal class GraphStateFiles(dir: Path, name: String) {
             )
             out.write("\n")
         }
+    }
+
+    /**
+     * Moves the outbox, with [unsaved] appended, and the copy aside as `<name>.outbox.gone-<millis>.jsonl` and
+     * `<name>.snapshot.gone-<millis>.ndjson`, for a graph deleted on the service; returns where the outbox went, null when
+     * there was nothing to keep.
+     */
+    fun setAside(unsaved: List<OutboxEntry>): Path? {
+        appendOutbox(unsaved)
+        val stamp = System.currentTimeMillis()
+        if (Files.exists(snapshot)) {
+            Files.move(snapshot, snapshot.resolveSibling("$name.snapshot.gone-$stamp.ndjson"), StandardCopyOption.REPLACE_EXISTING)
+        }
+        if (!Files.exists(outbox)) return null
+        val aside = outbox.resolveSibling("$name.outbox.gone-$stamp.jsonl")
+        Files.move(outbox, aside, StandardCopyOption.REPLACE_EXISTING)
+        return aside
     }
 
     fun readSnapshot(): CachedSnapshot? {
