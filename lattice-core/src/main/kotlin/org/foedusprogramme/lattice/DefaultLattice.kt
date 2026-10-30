@@ -8,6 +8,7 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -16,14 +17,17 @@ import org.foedusprogramme.lattice.core.Activation
 import org.foedusprogramme.lattice.core.DeadLetterEntry
 import org.foedusprogramme.lattice.core.EmbeddingSpec
 import org.foedusprogramme.lattice.core.Engram
+import org.foedusprogramme.lattice.core.Extraction
 import org.foedusprogramme.lattice.core.EntityAliasResolver
 import org.foedusprogramme.lattice.core.EntityResolver
 import org.foedusprogramme.lattice.core.EpisodeNarrator
 import org.foedusprogramme.lattice.core.FocusStack
+import org.foedusprogramme.lattice.core.GraphAccess
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.LatticeGraph
 import org.foedusprogramme.lattice.core.MemoryAbstractor
 import org.foedusprogramme.lattice.core.MemoryModel
+import org.foedusprogramme.lattice.core.MemoryModelInterruptedException
 import org.foedusprogramme.lattice.core.MemoryTask
 import org.foedusprogramme.lattice.core.MemoryTexts
 import org.foedusprogramme.lattice.core.ModelMergeJudge
@@ -35,6 +39,8 @@ import org.foedusprogramme.lattice.core.RecallDating
 import org.foedusprogramme.lattice.core.RecallFormatter
 import org.foedusprogramme.lattice.core.RecallMarkers
 import org.foedusprogramme.lattice.core.Reinforce
+import org.foedusprogramme.lattice.core.SceneChunkCapture
+import org.foedusprogramme.lattice.core.ScenePipeline
 import org.foedusprogramme.lattice.core.TemporalAnchor
 import org.foedusprogramme.lattice.core.TemporalAnchorResolver
 import org.foedusprogramme.lattice.core.TemporalIntent
@@ -71,6 +77,19 @@ internal fun interface SleepPass {
 }
 
 /**
+ * Told on the narration thread when a chat's scene narration drains ([ScenePipeline]'s `onChatDrained`): the seam for
+ * period formation. Reaches the graph through [DefaultLattice.graphAccess] only (it runs off the graph thread and must
+ * not suspend), and must not throw.
+ */
+internal fun interface ChatDrainedPass {
+    fun drained(lattice: DefaultLattice, chatKey: String)
+
+    companion object {
+        val NONE = ChatDrainedPass { _, _ -> }
+    }
+}
+
+/**
  * The [Lattice] implementation: the live calls over one graph and the sleep pipeline that maintains it.
  *
  * Threads. [LatticeGraph] is not thread-safe, so every graph access runs on one graph thread. Model calls never run
@@ -86,19 +105,26 @@ internal fun interface SleepPass {
  * watches its model itself: once a call reports that the backend is shutting down or was interrupted, or once [close]
  * started, the sleep stops at its next step and reports the rest as skipped.
  *
+ * Scenes. With a conversation source ([LatticeDependencies.conversations]), [SceneSettings.enabled] and a model, the
+ * instance runs one [ScenePipeline] on its capture and narration threads ([scenes]): a capture with a conversation id
+ * advances it, [conversationSealed] finishes a conversation, the sleep's CATCH_UP runs its catch-up and PERIODS waits
+ * for it to go idle first, and [close] waits for it to go idle before stopping the threads.
+ *
  * @param graphConfig the graph's tuning; null = the bge-m3 preset with the settings' switches ([graphConfig]).
- * @param catchUp the scene catch-up; null until the scene pipeline provides one (CATCH_UP is then reported skipped).
+ * @param catchUp the scene catch-up; null = the scene pipeline's when there is one (else CATCH_UP is reported skipped).
  * @param formPeriods period formation; null until the period former provides one (PERIODS is then reported skipped).
  * @param periodLabels the period tag labels of a turn-end recall; [PeriodLabels.NEUTRAL] until scene trust exists.
+ * @param chatDrained told when a chat's scene narration drains; period formation hooks in here.
  */
 internal class DefaultLattice(
     override val name: String,
     private val settings: LatticeSettings,
     private val dependencies: LatticeDependencies,
     graphConfig: LatticeGraph.Config? = null,
-    private val catchUp: SleepPass? = null,
+    catchUp: SleepPass? = null,
     private val formPeriods: SleepPass? = null,
     private val periodLabels: PeriodLabels = PeriodLabels.NEUTRAL,
+    private val chatDrained: ChatDrainedPass = ChatDrainedPass.NONE,
 ) : Lattice {
     private val logger = LoggerFactory.getLogger(DefaultLattice::class.java)
     private val store = dependencies.store
@@ -108,7 +134,11 @@ internal class DefaultLattice(
     private val now: () -> Instant = { dependencies.clock.instant() }
     private val sceneEpisodes = settings.scenes.enabled && settings.scenes.sceneEpisodes
 
-    private val graphExecutor = singleThread("graph")
+    @Volatile
+    private var graphThread: Thread? = null
+    private val graphExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "lattice-$name-graph").apply { isDaemon = true }.also { graphThread = it }
+    }
     private val captureExecutor = singleThread("capture")
     private val narrationExecutor = singleThread("narrate")
 
@@ -163,6 +193,59 @@ internal class DefaultLattice(
             Thread.currentThread().interrupt()
             throw IllegalStateException("Opening graph '$name' was interrupted.", e)
         }
+    }
+
+    /**
+     * The graph for code that blocks instead of suspending (the scene pipeline on the capture and narration threads):
+     * each block runs on the graph thread and the caller waits for it. Never call it on the graph thread itself.
+     */
+    internal val graphAccess: GraphAccess = object : GraphAccess {
+        override fun <T> withGraph(block: (LatticeGraph) -> T): T {
+            check(Thread.currentThread() !== graphThread) {
+                "GraphAccess.withGraph was called on the graph thread of '$name', which would wait for itself."
+            }
+            val task = FutureTask(Callable { block(graph) })
+            try {
+                graphExecutor.execute(task)
+            } catch (e: RejectedExecutionException) {
+                throw IllegalStateException("Lattice '$name' is closed; open the graph again to use it.", e)
+            }
+            return try {
+                task.get()
+            } catch (e: ExecutionException) {
+                throw e.cause ?: e
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                throw MemoryModelInterruptedException("Waiting for the graph of '$name' was interrupted.", e)
+            }
+        }
+    }
+
+    /** The scene pipeline; null without a conversation source, with scenes off or without a model. */
+    internal val scenes: ScenePipeline? = run {
+        val source = dependencies.conversations
+        if (source == null || !settings.scenes.enabled || model == null || extractor == null) return@run null
+        ScenePipeline(
+            graph = graphAccess,
+            source = source,
+            model = model,
+            embedder = embedder,
+            capture = SceneCapture(extractor),
+            captureExecutor = captureExecutor,
+            narrationExecutor = narrationExecutor,
+            settings = settings.scenes,
+            zone = zone,
+            userName = settings.userName,
+            selfAliases = settings.assistantNames,
+            trustPolicy = dependencies.sceneTrust,
+            deadLetter = dependencies.deadLetter,
+            onChatDrained = { chatKey -> chatDrained.drained(this, chatKey) },
+        )
+    }
+
+    /** CATCH_UP: [catchUp] when given, else the pipeline's catch-up, run off the scene threads. */
+    private val sceneCatchUp: SleepPass? = catchUp ?: scenes?.let { pipeline ->
+        SleepPass { runInterruptible(Dispatchers.IO) { pipeline.catchUp() } }
     }
 
     /** A new graph takes the embedder's spec; a graph embedded with another model refuses this embedder. */
@@ -322,6 +405,12 @@ internal class DefaultLattice(
      * other failure (the model down, the backend shutting down) stops the capture at once.
      */
     override suspend fun capture(transcript: Transcript): Int = call {
+        val conversationId = transcript.source.conversationId
+        val pipeline = scenes
+        if (pipeline != null && conversationId != null) {
+            pipeline.advance(conversationId)
+            return@call 0
+        }
         val ex = extractor ?: return@call 0
         var count = 0
         var poison: UnparseableExtractionException? = null
@@ -339,9 +428,17 @@ internal class DefaultLattice(
     }
 
     private suspend fun captureChunk(ex: NativeMemoryExtractor, chunk: TranscriptRenderer.Rendered): Int {
+        val extraction = onCapture { extract(ex, chunk) }
+        if (extraction.memories.isEmpty()) return 0
+        onGraph { g -> ingest(g, chunk, extraction, sceneId = null) }
+        return extraction.memories.size
+    }
+
+    /** Extracts [chunk], blocking; an answer that doesn't parse is dead-lettered and rethrown. */
+    private fun extract(ex: NativeMemoryExtractor, chunk: TranscriptRenderer.Rendered): Extraction {
         val referenceTime = chunk.referenceTime ?: now()
-        val extraction = try {
-            onCapture { ex.extract(chunk.text, referenceTime) }
+        try {
+            return ex.extract(chunk.text, referenceTime)
         } catch (e: UnparseableExtractionException) {
             val entry = DeadLetterEntry(
                 reason = e.message ?: "unparseable extraction",
@@ -356,19 +453,40 @@ internal class DefaultLattice(
             logger.warn("Lattice {} capture: the model's answer did not parse (dead-lettered)", name)
             throw e
         }
-        if (extraction.memories.isEmpty()) return 0
-        onGraph { g ->
-            val ids = NativeMemoryIngestor.ingest(
-                g, extraction,
-                sourceMessageId = chunk.sourceMessageId,
-                saidFrom = chunk.saidFrom ?: chunk.referenceTime,
-                saidTo = chunk.saidTo ?: chunk.referenceTime,
-                zone = zone,
-                tainted = chunk.tainted,
-            )
-            if (g.temporalRetrievalEnabled) pushFocus(ids.values.mapNotNull { g.engram(it)?.eventYearMonth })
+    }
+
+    /** Ingests [extraction] of [chunk], as members of scene [sceneId] when set; graph thread only. */
+    private fun ingest(g: LatticeGraph, chunk: TranscriptRenderer.Rendered, extraction: Extraction, sceneId: Long?) {
+        val ids = NativeMemoryIngestor.ingest(
+            g, extraction,
+            sourceMessageId = chunk.sourceMessageId,
+            sceneId = sceneId,
+            saidFrom = chunk.saidFrom ?: chunk.referenceTime,
+            saidTo = chunk.saidTo ?: chunk.referenceTime,
+            zone = zone,
+            tainted = chunk.tainted,
+        )
+        if (g.temporalRetrievalEnabled) pushFocus(ids.values.mapNotNull { g.engram(it)?.eventYearMonth })
+    }
+
+    /**
+     * The scene pipeline's capture: one chunk of a scene, extracted on the calling thread (the capture thread) and
+     * ingested on the graph thread as members of its scene.
+     */
+    private inner class SceneCapture(private val ex: NativeMemoryExtractor) : SceneChunkCapture {
+        override fun capture(transcript: Transcript, sceneId: Long?): Int {
+            val chunk = TranscriptRenderer.render(transcript, zone)
+            if (chunk.text.isBlank()) return 0
+            val extraction = extract(ex, chunk)
+            if (extraction.memories.isEmpty()) return 0
+            graphAccess.withGraph { g -> ingest(g, chunk, extraction, sceneId) }
+            return extraction.memories.size
         }
-        return extraction.memories.size
+    }
+
+    override suspend fun conversationSealed(conversationId: String) = call {
+        scenes?.captureSealed(conversationId)
+        Unit
     }
 
     /**
@@ -441,7 +559,8 @@ internal class DefaultLattice(
         val needs = when (phase) {
             SleepPhase.CATCH_UP -> when {
                 !settings.scenes.enabled -> return "Scenes are off."
-                catchUp == null -> return "Scene catch-up is not available in this build."
+                sceneCatchUp == null && dependencies.conversations == null ->
+                    return "The host provides no conversations to read scenes from."
                 else -> Needs.MODEL_AND_EMBEDDER
             }
             SleepPhase.PERIODS -> when {
@@ -478,8 +597,12 @@ internal class DefaultLattice(
         val started = TimeSource.Monotonic.markNow()
         return try {
             val count = when (phase) {
-                SleepPhase.CATCH_UP -> checkNotNull(catchUp).run(this)
-                SleepPhase.PERIODS -> checkNotNull(formPeriods).run(this)
+                SleepPhase.CATCH_UP -> checkNotNull(sceneCatchUp).run(this)
+                SleepPhase.PERIODS -> {
+                    // Periods are formed from settled scenes: let the catch-up's narration finish first.
+                    scenes?.let { pipeline -> runInterruptible(Dispatchers.IO) { pipeline.awaitIdle() } }
+                    checkNotNull(formPeriods).run(this)
+                }
                 // Merge before synthesizing (abstract a clean graph); synthesize after the merge so a fresh parent is
                 // never folded away by the same sleep. The judged half of the merge runs in its own phase.
                 SleepPhase.CONSOLIDATE -> onGraph { g -> g.consolidate().promoted + g.mergeDuplicates(runJudgedPass = false) }
@@ -647,9 +770,10 @@ internal class DefaultLattice(
 
     /**
      * Refuses new calls, waits up to [LatticeSettings.shutdownTimeout] for the calls in flight (a running sleep stops at
-     * its next step), then stops the threads and flushes and closes the store as the graph thread's last task. Calls
-     * still running at the deadline are interrupted on the capture and narration threads; the graph thread is never
-     * interrupted. A second close waits for the first.
+     * its next step) and then for the scene work queued so far, then stops the threads and flushes and closes the store
+     * as the graph thread's last task. Work still running at the deadline is interrupted on the capture and narration
+     * threads (a scene model call cut off this way counts no attempt); the graph thread is never interrupted. A second
+     * close waits for the first.
      */
     override suspend fun close(): Unit = withContext(NonCancellable) {
         val first = synchronized(lifecycle) {
@@ -669,6 +793,15 @@ internal class DefaultLattice(
         fun remaining(): Duration = (-deadline.elapsedNow()).coerceAtLeast(Duration.ZERO)
         if (withTimeoutOrNull(remaining()) { drained.await() } == null) {
             logger.warn("Lattice {} close: calls still running after {}; stopping anyway", name, settings.shutdownTimeout)
+        }
+        scenes?.let { pipeline ->
+            val idle = try {
+                withTimeoutOrNull(remaining()) { runInterruptible(Dispatchers.IO) { pipeline.awaitIdle() } }
+            } catch (e: Exception) {
+                logger.warn("Lattice {} close: waiting for the scene work failed: {}", name, e.message, e)
+                Unit
+            }
+            if (idle == null) logger.warn("Lattice {} close: scene work still queued after {}; stopping anyway", name, settings.shutdownTimeout)
         }
         withContext(Dispatchers.IO) {
             stop(captureExecutor, remaining(), interrupt = true)

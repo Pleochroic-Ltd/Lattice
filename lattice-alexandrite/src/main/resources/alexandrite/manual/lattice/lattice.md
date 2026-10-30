@@ -14,6 +14,18 @@ conversation, and when the conversation is compacted or sealed with `/new`, it e
 memory taken from a tainted conversation stays tainted. When a sealed conversation was compacted before, its last
 summary is kept as an episode.
 
+With scenes on, Lattice captures a conversation scene by scene instead: after each message turn it reads the
+conversation back from Alexandrite's stores, cuts what has gathered into scenes (stretches of one topic or one
+occasion), extracts the memories of each ended scene, and writes a short summary of it that recall can bring back. A
+conversation sealed with `/new` is cut to its end. Heartbeats and sub-agent runs stay out of a chat's scenes. Whatever
+a turn or a seal leaves uncut is caught up in the nightly sleep.
+
+A scene is trusted only when everyone who wrote in it is an operator or a trusted user of the chat (or named in
+`scenes.trustedSenders`), every tool result in it comes from a read-only tool or one that changes only the agent's own
+state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quoted unverified or written after the
+conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
+Lattice learns each tool's risk when a turn offers it.
+
 Every night at the configured time, each graph sleeps: it consolidates memories, merges duplicates, writes summaries of
 clusters and lets unused memories fade.
 
@@ -55,6 +67,11 @@ Lattice reads `plugins.lattice`:
 - `sleep`: `enabled`, `at` (a local time `HH:mm`) and `zone`.
 - `graph`: the engine's switches, such as `entityExtraction`, `entityRecall`, `sameDayEpisodes`, `judgeBudget` and
   `readTimeoutSeconds`.
+- `scenes`: `enabled` (off by default; needs a model and Alexandrite's stores, and replaces `capture`'s batches),
+  `sceneEpisodes` (recall shows when each memory was said, and scene summaries beside facts), `narrationCheck`
+  (`anchors` or `selfCheck`), `segmentBatchMessages` (said messages that gather before a live conversation is cut),
+  `segmentLookaheadMessages`, `segmentWindowMessages`, `trustedSenders` (user addresses such as `telegram:main@123456`),
+  `trustedTools`, and `rawTextTools` (tools that replay stored conversation text, besides `history.search`).
 
 A config with a local graph, a local embedding server and the host's models:
 
@@ -73,6 +90,18 @@ A config with a local graph, a local embedding server and the host's models:
       "recall": {"limit": 6, "language": "en"},
       "capture": {"turnsPerBatch": 4},
       "sleep": {"at": "03:30"}
+    }
+  }
+}
+```
+
+Scenes on, with recall that shows when things were said, added to a config like the one above:
+
+```json
+{
+  "plugins": {
+    "lattice": {
+      "scenes": {"enabled": true, "sceneEpisodes": true, "trustedTools": ["notes.read"]}
     }
   }
 }

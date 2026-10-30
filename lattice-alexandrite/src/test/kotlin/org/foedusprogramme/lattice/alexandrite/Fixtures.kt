@@ -71,6 +71,7 @@ internal class FakeLattice(override val name: String) : Lattice {
     val captures = MutableStateFlow<List<Transcript>>(emptyList())
     val episodes = MutableStateFlow<List<Pair<String, Transcript.Source?>>>(emptyList())
     val sleeps = MutableStateFlow(0)
+    val sealed = MutableStateFlow<List<String>>(emptyList())
 
     @Volatile
     var closed = false
@@ -88,6 +89,10 @@ internal class FakeLattice(override val name: String) : Lattice {
     override suspend fun capture(transcript: Transcript): Int {
         captures.update { it + transcript }
         return transcript.lines.size
+    }
+
+    override suspend fun conversationSealed(conversationId: String) {
+        sealed.update { it + conversationId }
     }
 
     override suspend fun saveEpisode(summary: String, source: Transcript.Source?): Long? {
@@ -111,6 +116,8 @@ internal class FakeLattice(override val name: String) : Lattice {
 
     suspend fun awaitCaptures(count: Int): List<Transcript> =
         withTimeout(WAIT) { captures.first { it.size >= count } }
+
+    suspend fun awaitSealed(count: Int): List<String> = withTimeout(WAIT) { sealed.first { it.size >= count } }
 
     suspend fun awaitEpisodes(count: Int): List<Pair<String, Transcript.Source?>> =
         withTimeout(WAIT) { episodes.first { it.size >= count } }

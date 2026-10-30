@@ -2,11 +2,14 @@ package org.foedusprogramme.lattice.alexandrite
 
 import kotlinx.serialization.Serializable
 import org.foedusprogramme.lattice.LatticeSettings
+import org.foedusprogramme.lattice.SceneSettings
 import org.foedusprogramme.lattice.core.Language
 import org.foedusprogramme.lattice.core.MemoryTask
 import org.unitedsoftware.alexandrite.sdk.chat.LanguageTag
+import org.unitedsoftware.alexandrite.sdk.chat.UserAddress
 import org.unitedsoftware.alexandrite.sdk.config.ConfigSection
 import org.unitedsoftware.alexandrite.sdk.config.Secret
+import org.unitedsoftware.alexandrite.sdk.tool.ToolNames
 import org.unitedsoftware.alexandrite.sdk.transcript.ModelRef
 import java.net.URI
 import java.net.URISyntaxException
@@ -37,6 +40,7 @@ internal class LatticeConfig(
     val capture: CaptureConfig = CaptureConfig(),
     val sleep: SleepConfig = SleepConfig(),
     val graph: GraphConfig = GraphConfig(),
+    val scenes: ScenesConfig = ScenesConfig(),
 ) {
     init {
         require(userName == null || userName.isNotBlank()) {
@@ -73,6 +77,11 @@ internal class LatticeConfig(
         capture.check()
         sleep.check()
         graph.check()
+        scenes.check()
+        require(!scenes.enabled || model.kind != NONE) {
+            "scenes.enabled needs a model to cut conversations into scenes: set model.kind to \"host\", \"openai\" " +
+                "or \"pleochroic\", or set scenes.enabled to false."
+        }
     }
 
     val embedderConfig: EmbedderConfig get() = embedder!!
@@ -104,6 +113,7 @@ internal class LatticeConfig(
         entityExtraction = graph.entityExtraction,
         entityRecall = graph.entityRecall,
         entityCoEncodeGate = graph.entityCoEncodeGate,
+        scenes = scenes.settings(),
     )
 }
 
@@ -342,6 +352,63 @@ internal class GraphConfig(
     }
 }
 
+@Serializable
+internal class ScenesConfig(
+    /** Cut conversations into scenes and capture them scene by scene, instead of in batches of turns. */
+    val enabled: Boolean = false,
+    /** Show when each recalled memory was said, and recall scene summaries beside facts. */
+    val sceneEpisodes: Boolean = false,
+    /** `anchors` or `selfCheck`: how a scene summary is checked against the scene. */
+    val narrationCheck: String = ANCHORS,
+    /** How many said messages of a live conversation gather before they are cut into scenes. */
+    val segmentBatchMessages: Int = 60,
+    /** How many of the latest said messages wait as the next cut's lookahead. */
+    val segmentLookaheadMessages: Int = 20,
+    /** The most messages one segmentation call reads. */
+    val segmentWindowMessages: Int = 200,
+    /** User addresses whose words are trusted in every chat, besides the channels' operators and trusted users. */
+    val trustedSenders: List<String> = emptyList(),
+    /** Tools whose results are trusted whatever their risk. */
+    val trustedTools: List<String> = emptyList(),
+    /** Tools whose results replay stored conversation text, so they are never trusted, besides `history.search`. */
+    val rawTextTools: List<String> = emptyList(),
+) {
+    fun check() {
+        require(narrationCheck == ANCHORS || narrationCheck == SELF_CHECK) {
+            "scenes.narrationCheck must be \"$ANCHORS\" or \"$SELF_CHECK\"."
+        }
+        require(segmentBatchMessages in 1..MAX_SEGMENT) { "scenes.segmentBatchMessages must be between 1 and $MAX_SEGMENT." }
+        require(segmentLookaheadMessages in 0..MAX_LOOKAHEAD) {
+            "scenes.segmentLookaheadMessages must be between 0 and $MAX_LOOKAHEAD."
+        }
+        require(segmentWindowMessages in MIN_WINDOW..MAX_SEGMENT) {
+            "scenes.segmentWindowMessages must be between $MIN_WINDOW and $MAX_SEGMENT."
+        }
+        for (sender in trustedSenders) {
+            requireNotNull(UserAddress.parseOrNull(sender)) {
+                "scenes.trustedSenders holds '$sender', which is no user address: write one as " +
+                    "<channel>:<instance>@<user>, such as \"telegram:main@123456\"."
+            }
+        }
+        for ((path, tools) in listOf("scenes.trustedTools" to trustedTools, "scenes.rawTextTools" to rawTextTools)) {
+            for (tool in tools) {
+                require(ToolNames.PATTERN.matches(tool)) {
+                    "$path holds '$tool', which is no tool name: write it as the tool is called, such as \"fs.read\"."
+                }
+            }
+        }
+    }
+
+    fun settings(): SceneSettings = SceneSettings(
+        enabled = enabled,
+        sceneEpisodes = sceneEpisodes,
+        narrationCheck = narrationCheck,
+        segmentWindowMessages = segmentWindowMessages,
+        segmentLookaheadMessages = segmentLookaheadMessages,
+        segmentBatchMessages = segmentBatchMessages,
+    )
+}
+
 private fun zoneOf(path: String, value: String): ZoneId = try {
     ZoneId.of(value)
 } catch (e: DateTimeException) {
@@ -369,11 +436,16 @@ internal const val HOST: String = "host"
 internal const val NONE: String = "none"
 internal const val DROP: String = "drop"
 internal const val BAKE: String = "bake"
+internal const val ANCHORS: String = "anchors"
+internal const val SELF_CHECK: String = "selfCheck"
 
 private const val MAX_DIMENSION = 65_536
 private const val MAX_RECALL = 50
 private const val MAX_RECALL_MILLIS = 8000L
 private const val MAX_BATCH = 100
+private const val MAX_SEGMENT = 1000
+private const val MAX_LOOKAHEAD = 200
+private const val MIN_WINDOW = 10
 
 private val GRAPH_PREFIX = Regex("[a-z0-9-]*")
 

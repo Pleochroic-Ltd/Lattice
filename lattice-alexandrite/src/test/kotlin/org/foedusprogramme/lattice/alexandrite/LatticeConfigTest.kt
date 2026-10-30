@@ -80,6 +80,53 @@ class LatticeConfigTest {
     }
 
     @Test
+    fun `scenes decode into the scene settings and are off by default`() {
+        val off = decode(BASE_CONFIG).settings(ZoneOffset.UTC).scenes
+        assertFalse(off.enabled)
+        assertFalse(off.sceneEpisodes)
+
+        val config = decode(
+            config(
+                """
+                {
+                  "model": {"kind": "openai", "baseUrl": "http://127.0.0.1:8080/v1", "default": "qwen3-8b"},
+                  "scenes": {
+                    "enabled": true, "sceneEpisodes": true, "narrationCheck": "selfCheck",
+                    "segmentBatchMessages": 30, "segmentLookaheadMessages": 10, "segmentWindowMessages": 120,
+                    "trustedSenders": ["telegram:main@42"], "trustedTools": ["fs.read"], "rawTextTools": ["notes.dump"]
+                  }
+                }
+                """,
+            ),
+        )
+        val scenes = config.settings(ZoneOffset.UTC).scenes
+
+        assertTrue(scenes.enabled)
+        assertTrue(scenes.sceneEpisodes)
+        assertEquals("selfCheck", scenes.narrationCheck)
+        assertEquals(30, scenes.segmentBatchMessages)
+        assertEquals(10, scenes.segmentLookaheadMessages)
+        assertEquals(120, scenes.segmentWindowMessages)
+        assertEquals(listOf("telegram:main@42"), config.scenes.trustedSenders)
+    }
+
+    @Test
+    fun `scene values are checked, and scenes need a model`() {
+        val model = """"model": {"kind": "openai", "baseUrl": "http://x", "default": "m"}"""
+        assertContains(refused(config("""{"scenes": {"enabled": true}}""")), "scenes.enabled needs a model")
+        assertContains(refused(config("""{$model, "scenes": {"narrationCheck": "strict"}}""")), "scenes.narrationCheck must be")
+        assertContains(refused(config("""{"scenes": {"segmentBatchMessages": 0}}""")), "scenes.segmentBatchMessages must be")
+        assertContains(refused(config("""{"scenes": {"segmentLookaheadMessages": -1}}""")), "scenes.segmentLookaheadMessages")
+        assertContains(refused(config("""{"scenes": {"segmentWindowMessages": 5}}""")), "scenes.segmentWindowMessages")
+        assertContains(
+            refused(config("""{"scenes": {"trustedSenders": ["alice"]}}""")),
+            "scenes.trustedSenders holds 'alice', which is no user address",
+        )
+        assertContains(refused(config("""{"scenes": {"trustedTools": ["Web Fetch"]}}""")), "scenes.trustedTools holds 'Web Fetch'")
+        assertContains(refused(config("""{"scenes": {"rawTextTools": [""]}}""")), "scenes.rawTextTools holds ''")
+    }
+
+    @Test
     fun `an unknown key is refused, also in a nested object`() {
         assertFailsWith<SerializationException> { decode(config("""{"recal": {}}""")) }
         assertFailsWith<SerializationException> { decode(config("""{"recall": {"limits": 3}}""")) }
