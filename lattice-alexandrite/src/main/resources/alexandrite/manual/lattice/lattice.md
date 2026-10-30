@@ -26,8 +26,14 @@ state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quot
 conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
 Lattice learns each tool's risk when a turn offers it.
 
-Every night at the configured time, each graph sleeps: it consolidates memories, merges duplicates, writes summaries of
-clusters and lets unused memories fade.
+Once a chat's scenes have settled, Lattice groups them into periods (named stretches of what happened, such as a trip
+or a project) and older periods into eras, and writes the chat's period catalogue: its eras and periods in a few
+lines with their dates. Each turn of the chat carries the catalogue at the end of its system prompt, the same text from
+turn to turn until a new one is written, so the prompt cache holds. A period or era is named only when every scene it
+was named from is trusted; otherwise the catalogue, the timeline and recall give its dates instead.
+
+Every night at the configured time, each graph sleeps: it catches up on scenes and forms periods (with scenes on),
+consolidates memories, merges duplicates, writes summaries of clusters and lets unused memories fade.
 
 ## Tools
 
@@ -36,11 +42,15 @@ clusters and lets unused memories fade.
   answer. Its result is untrusted when it holds memories of tainted turns.
 - lattice.save: saves one memory as written, with an importance from 0 to 1. Write one self-contained statement that
   names who and when. A save from a tainted conversation is saved tainted.
+- lattice.timeline: shows the chat's eras and periods with their dates; given a period or an era (a name, part of one,
+  an old name, or a date inside it), its summary and its scenes. A scene with untrusted content is listed by its date
+  only. A period whose name lists withhold, found by a date, shows its name and summary as untrusted content. Needs
+  scenes.
 
 ## In chats
 
-`/memory` or `/memory status` shows the memory of the chat's agent: its size, its embedding model, the last and the next
-sleep. Operators also run `/memory search <query>`, whose result the model is not shown, and `/memory sleep`, which
+`/memory` or `/memory status` shows the memory of the chat's agent: its size (memories, links, entities, scenes and
+periods), its embedding model, the last and the next sleep. Operators also run `/memory search <query>`, whose result the model is not shown, and `/memory sleep`, which
 starts a sleep now.
 
 ## Config
@@ -60,9 +70,10 @@ Lattice reads `plugins.lattice`:
   or `none` to keep memories without extracting any. The tasks are `extract`, `judge`, `abstract`, `entities`,
   `narrate`, `scenes` and `periods`. `maxOutputTokens` and `timeoutSeconds` bound each call.
 - `pleochroic.baseUrl`, `pleochroic.apiKey`: the account that every `pleochroic` part uses.
-- `recall`: `enabled`, `limit` (memories per turn), `language` (of the block's markers), `timeoutMillis`, and `fallback`
-  (`drop` or `bake`: whether an endpoint that cannot show the block for one turn alone leaves it out or keeps it in the
-  turn's message).
+- `recall`: `enabled`, `limit` (memories per turn), `language` (of the block's markers and the period catalogue),
+  `timeoutMillis` (also bounds reading the catalogue), `fallback` (`drop` or `bake`: whether an endpoint that cannot
+  show the block for one turn alone leaves it out or keeps it in the turn's message), and `catalogue` (on by default:
+  whether each turn's system prompt carries the chat's period catalogue; read only with scenes on).
 - `capture`: `enabled`, `turnsPerBatch`, `onCompaction`, `onSeal`, and `episodes`.
 - `sleep`: `enabled`, `at` (a local time `HH:mm`) and `zone`.
 - `graph`: the engine's switches, such as `entityExtraction`, `entityRecall`, `sameDayEpisodes`, `judgeBudget` and
