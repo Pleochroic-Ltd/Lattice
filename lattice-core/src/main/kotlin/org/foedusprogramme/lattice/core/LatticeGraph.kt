@@ -416,8 +416,6 @@ class LatticeGraph(
         val periodRecall: Boolean = false,
         /** Contract (b): a RELEVANCE cue with a resolved POINT anchor order-nudges the base toward the focal month. */
         val temporalRerank: Boolean = false,
-        /** Scoped out: off-thread LLM date-parser fallback when the grammar misses. Stays off (resolver abstains). */
-        val llmAnchorFallback: Boolean = false,
         /** Rerank strength: the base score is scaled by `(1 + lambda*timeProximity)`. Inert while [temporalRerank] off. */
         val temporalRerankLambda: Double = 0.15,
         /** Rerank month-distance half-life: proximity = `0.5^(monthDist/halflife)`. Inert while [temporalRerank] off. */
