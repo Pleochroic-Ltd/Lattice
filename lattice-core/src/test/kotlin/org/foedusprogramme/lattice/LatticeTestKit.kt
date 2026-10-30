@@ -36,6 +36,8 @@ internal object LatticeTestKit {
         name: String = "test",
         catchUp: SleepPass? = null,
         formPeriods: SleepPass? = null,
+        conversations: ConversationSource? = null,
+        sceneTrust: SceneTrustPolicy = SceneTrustPolicy.Conservative,
     ) = DefaultLattice(
         name = name,
         settings = settings,
@@ -47,6 +49,8 @@ internal object LatticeTestKit {
             texts = BundledTexts,
             deadLetter = deadLetter,
             clock = Clock.fixed(now, ZoneOffset.UTC),
+            conversations = conversations,
+            sceneTrust = sceneTrust,
         ),
         graphConfig = graphConfig,
         catchUp = catchUp,
