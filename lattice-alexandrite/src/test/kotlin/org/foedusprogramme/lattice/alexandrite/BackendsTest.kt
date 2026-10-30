@@ -35,6 +35,7 @@ class BackendsTest {
             files,
             store.transcripts.takeIf { bindStores },
             store.conversations.takeIf { bindStores },
+            MemoryAccess(config),
         )
         return Backends(config, dir, emptyList(), Clock.systemUTC(), scenes).dependencies("main")
             .also { it.store.close() }
@@ -50,12 +51,16 @@ class BackendsTest {
 
     @Test
     fun `a host that binds no store is told once at start, with what Lattice goes without`() {
-        fun warning(extra: String, transcripts: Boolean, conversations: Boolean): String? = SceneHost(
-            Json.decodeFromString(LatticeConfig.serializer(), config(extra)),
-            files,
-            store.transcripts.takeIf { transcripts },
-            store.conversations.takeIf { conversations },
-        ).storesWarning()
+        fun warning(extra: String, transcripts: Boolean, conversations: Boolean): String? {
+            val config = Json.decodeFromString(LatticeConfig.serializer(), config(extra))
+            return SceneHost(
+                config,
+                files,
+                store.transcripts.takeIf { transcripts },
+                store.conversations.takeIf { conversations },
+                MemoryAccess(config),
+            ).storesWarning()
+        }
 
         assertNull(warning("{}", transcripts = true, conversations = true))
         assertEquals(

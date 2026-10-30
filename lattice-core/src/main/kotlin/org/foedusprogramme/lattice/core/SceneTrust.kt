@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
  *  - a tool result of a tool the policy does not trust, of a call that replayed stored conversation text
  *    ([SceneTrustPolicy.opensRawText]), or that names no tool;
  *  - text the host wrote itself from a source the policy does not trust (a reminder carries a prompt a model wrote);
+ *  - none of its messages reads back: the host does not have its conversation (another device's or another agent's)
+ *    or no longer has its range, so nothing vouches for it ([Cause.UNREADABLE]; not a failed read, since it lasts);
  *  - it advances or closes a thread opened by an untrusted scene (a thread link counts for every scene its memory
  *    belongs to). Judged in [SCENE_ORDER] per chat, so the verdict propagates down a chain of threads and never
  *    reaches back to an EARLIER scene (a backfilled set-up).
@@ -33,7 +35,7 @@ class SceneTrust(
 
     /**
      * Content verdicts of ENDED scenes: their messages no longer change, so a scene whose range is as it was is not
-     * read again (only the thread rule is re-run). Failed reads and OPEN scenes are never kept.
+     * read again (only the thread rule is re-run). Failed or empty reads and OPEN scenes are never kept.
      */
     private data class Judged(val firstMessageId: Long, val lastMessageId: Long, val causes: Set<Cause>)
 
@@ -49,6 +51,7 @@ class SceneTrust(
         TRANSCRIPT_TOOL("transcript_tool"),
         HOST_TEXT("host_text"),
         UNTRUSTED_THREAD("untrusted_thread"),
+        UNREADABLE("unreadable"),
         READ_FAILED("read_failed"),
     }
 
@@ -85,9 +88,14 @@ class SceneTrust(
         return result
     }
 
-    /** The per-message rules alone (no thread rule) over [messages] of chat [chatKey]. Empty = trusted. */
-    fun judgeMessages(chatKey: String, messages: List<ConversationMessage>): Set<Cause> =
-        messages.mapNotNullTo(LinkedHashSet()) { judge(chatKey, it) }
+    /**
+     * The per-message rules alone (no thread rule) over [messages] of chat [chatKey]. Empty = trusted, except that no
+     * messages at all is [Cause.UNREADABLE]: a scene always holds some, so an empty read vouches for nothing.
+     */
+    fun judgeMessages(chatKey: String, messages: List<ConversationMessage>): Set<Cause> {
+        if (messages.isEmpty()) return setOf(Cause.UNREADABLE)
+        return messages.mapNotNullTo(LinkedHashSet()) { judge(chatKey, it) }
+    }
 
     private class ChatScene(val scene: SceneRecord, val open: Boolean)
 
@@ -111,7 +119,10 @@ class SceneTrust(
             content[scene.sceneId] = kept?.causes?.toMutableSet() ?: try {
                 val messages = source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
                 val causes = judgeMessages(chatKey, messages)
-                if (!cs.open) judged[scene.sceneId] = Judged(scene.firstMessageId, scene.lastMessageId, causes)
+                // An unreadable scene is judged again: the host may have its conversation later.
+                if (!cs.open && Cause.UNREADABLE !in causes) {
+                    judged[scene.sceneId] = Judged(scene.firstMessageId, scene.lastMessageId, causes)
+                }
                 causes.toMutableSet()
             } catch (e: Exception) {
                 logger.warn("Scene trust: could not read scene={} chat={}: {}", scene.sceneId, chatKey, e.toString())

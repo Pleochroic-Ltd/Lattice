@@ -100,5 +100,8 @@ class PleochroicApiException(
     val detail: JsonObject? = null,
 ) : RuntimeException("Pleochroic answered $status $code: $message")
 
+/** Pleochroic refused the API key (`401` or `403`) where the call can't wait for a valid one. */
+class PleochroicKeyRefusedException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)
+
 /** Pleochroic couldn't be reached: no connection, a timeout, or a connection lost mid-answer. */
 class PleochroicUnreachableException(message: String, cause: Throwable? = null) : RuntimeException(message, cause)

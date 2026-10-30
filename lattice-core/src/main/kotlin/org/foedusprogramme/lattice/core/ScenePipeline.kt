@@ -433,15 +433,20 @@ class ScenePipeline(
 
     // --- extraction --------------------------------------------------------------------------------------------------
 
-    /** Scenes of [conversationId] (null = of every conversation) whose extraction stopped at a failed chunk: try again. */
+    /**
+     * Scenes of [conversationId] (null = of every conversation this host has) whose extraction stopped at a failed
+     * chunk: try again. Another device's scenes in a shared graph are left to it.
+     */
     private fun retryPendingScenes(conversationId: String?, pass: Pass) {
         val pending = graph.withGraph { g ->
             g.scenes().filter { s ->
                 val work = g.sceneWork(s.sceneId)
                 (conversationId == null || s.conversationId == conversationId) && work != null && pendingExtraction(s, work)
-            }.sortedWith(SCENE_ORDER).map { it.sceneId }
+            }.sortedWith(SCENE_ORDER).map { it.sceneId to it.conversationId }
         }
-        for (sceneId in pending) {
+        val hosted = Hosted()
+        for ((sceneId, conversation) in pending) {
+            if (!hosted(conversation)) continue
             extractScene(sceneId, pass)
             reevaluate(sceneId)
         }
@@ -453,7 +458,9 @@ class ScenePipeline(
 
     /**
      * Extracts the scene's messages after [SceneWorkRecord.extractedThrough] in chunks of at most [chunkSize] said
-     * messages; stops at a chunk that fails short of its cap (the next pass retries it).
+     * messages; stops at a chunk that fails short of its cap (the next pass retries it). A chunk is tainted by anything
+     * untrusted in its scene up to its end, not only within it: the extractor sees the chunk alone, so an answer that
+     * repeats an untrusted message of an earlier chunk would otherwise pass for the assistant's own words.
      */
     private fun extractScene(sceneId: Long, pass: Pass) {
         val (scene, start) = graph.withGraph { g ->
@@ -463,20 +470,24 @@ class ScenePipeline(
             else scene to (work.extractedThrough ?: (scene.firstMessageId - 1)) + 1
         }
         if (scene == null || start == null) return
-        val messages = source.messages(scene.conversationId, start, scene.lastMessageId)
+        val read = source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
+        val messages = read.filter { it.position >= start }
+        if (messages.isEmpty()) {
+            unreadRange(scene, start)
+            return
+        }
+        // Taint carries forward through the scene, from before the pending part too.
+        val firstTainted = read.firstOrNull { it.tainted }?.position
         val chunks = messages.filter { it.said }.chunked(chunkSize)
-        var previousEnd = start - 1
         for ((i, chunk) in chunks.withIndex()) {
             // The last chunk settles the whole range, trailing host and tool messages included.
             val end = if (i == chunks.lastIndex) scene.lastMessageId else chunk.last().position
             val from = chunk.first().position
-            // A chunk is tainted by anything untrusted since the previous one: a tool result between two said messages.
             val transcript = Transcript(
                 chunk.map { it.transcriptLine() },
                 Transcript.Source(scene.chatKey, scene.conversationId),
-                tainted = messages.any { it.tainted && it.position > previousEnd && it.position <= end },
+                tainted = firstTainted != null && firstTainted <= end,
             )
-            previousEnd = end
             val outcome = runCatching { capture.capture(transcript, sceneId) }
             val failure = outcome.exceptionOrNull()
             if (failure != null && (failure.isMemoryModelShutdown() || failure.isMemoryModelInterrupted())) {
@@ -509,6 +520,40 @@ class ScenePipeline(
     }
 
     /**
+     * The range [start]..last of [scene] read back nothing, so none of it can count as extracted. Another device's
+     * conversation is left to it; one this host has counts a failed chunk, and at the cap the range is given up (the
+     * scene is incomplete) so that it does not hold the chat's later scenes back for good.
+     */
+    private fun unreadRange(scene: SceneRecord, start: Long) {
+        if (!Hosted()(scene.conversationId)) return
+        val gaveUp = settle { g ->
+            val work = g.sceneWork(scene.sceneId) ?: return@settle false
+            val next = if (work.extractAttempts + 1 >= MAX_CHUNK_ATTEMPTS) {
+                work.copy(extractedThrough = scene.lastMessageId, extractAttempts = 0, chunksFailed = work.chunksFailed + 1)
+            } else {
+                work.copy(extractAttempts = work.extractAttempts + 1)
+            }
+            g.putSceneState(work = next)
+            next.extractedThrough == scene.lastMessageId
+        }
+        logger.warn(
+            "Scene messages read back nothing scene={} messages={}..{} conversation={}{}",
+            scene.sceneId, start, scene.lastMessageId, scene.conversationId, if (gaveUp) "; given up" else "",
+        )
+    }
+
+    /** Whether this host has each conversation asked about, read once per instance; a read that fails says no. */
+    private inner class Hosted {
+        private val known = HashMap<String, Boolean>()
+
+        operator fun invoke(conversationId: String): Boolean = known.getOrPut(conversationId) {
+            runCatching { source.conversation(conversationId) != null }
+                .onFailure { logger.warn("Scene pipeline: conversation {} is unreadable: {}", conversationId, it.message) }
+                .getOrDefault(false)
+        }
+    }
+
+    /**
      * Past the segmentation cap: the messages up to [SceneCursorRecord.fallbackThrough] are extracted in plain chunks
      * without a scene. Only a reply that did not parse counts an attempt here (an outage must not burn them); at the cap
      * the chunk is given up. Returns the cursor after it: the fallback cleared once done.
@@ -520,10 +565,11 @@ class ScenePipeline(
         val chunks = messages.filter { it.said }.chunked(chunkSize)
         for ((i, chunk) in chunks.withIndex()) {
             val end = if (i == chunks.lastIndex) through else chunk.last().position
+            // As in a scene, taint carries forward through the run.
             val transcript = Transcript(
                 chunk.map { it.transcriptLine() },
                 Transcript.Source(info.chatKey, info.id),
-                tainted = messages.any { it.tainted && it.position <= end && it.position > (cursor.segmentedThrough ?: Long.MIN_VALUE) },
+                tainted = messages.any { it.tainted && it.position <= end },
             )
             val failure = runCatching { capture.capture(transcript, null) }.exceptionOrNull()
             cursor = when {
@@ -585,10 +631,13 @@ class ScenePipeline(
     private fun catchUpNow(): Int {
         // Scenes already waiting on narration are offered once more at the end; one that becomes ready during the pass
         // is offered by its own hand-over.
-        val waiting = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.NARRATING }.map { it.sceneId } }
+        // Another device's scenes in a shared graph are its own to extract and narrate.
+        val hosted = Hosted()
+        val waiting = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.NARRATING } }
+            .filter { hosted(it.conversationId) }.map { it.sceneId }
         val cursors = graph.withGraph { g -> g.sceneCursors().associateBy { it.conversationId } }
         val conversations = LinkedHashSet<String>()
-        cursors.values.filter { !it.finished }.mapTo(conversations) { it.conversationId }
+        cursors.values.filter { !it.finished && hosted(it.conversationId) }.mapTo(conversations) { it.conversationId }
         val chats = runCatching { source.chats() }
             .onFailure { logger.warn("Scene catch-up: the host's chats are unreadable: {}", it.message) }
             .getOrDefault(emptyList())
@@ -612,7 +661,8 @@ class ScenePipeline(
                 .getOrDefault(0)
         }
         // Heal scenes whose extraction settled without a hand-over, then re-offer the ones that were waiting.
-        val settled = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.EXTRACTING }.map { it.sceneId } }
+        val settled = graph.withGraph { g -> g.scenes().filter { g.sceneWork(it.sceneId)?.state == SceneWorkState.EXTRACTING } }
+            .filter { hosted(it.conversationId) }.map { it.sceneId }
         settled.forEach(::reevaluate)
         for (sceneId in waiting) {
             if (graph.withGraph { it.sceneWork(sceneId)?.state } == SceneWorkState.NARRATING) narration.offer(sceneId)

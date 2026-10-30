@@ -17,6 +17,7 @@ import org.unitedsoftware.alexandrite.sdk.di.Singleton
 import org.unitedsoftware.alexandrite.sdk.hook.Hook
 import org.unitedsoftware.alexandrite.sdk.hook.ObserverHook
 import org.unitedsoftware.alexandrite.sdk.hook.ObserverPoint
+import org.unitedsoftware.alexandrite.sdk.plugin.PluginFiles
 import org.unitedsoftware.alexandrite.sdk.plugin.PluginScope
 import org.unitedsoftware.alexandrite.sdk.store.ConversationStore
 import org.unitedsoftware.alexandrite.sdk.transcript.AssistantEntry
@@ -28,13 +29,14 @@ import org.unitedsoftware.alexandrite.sdk.turn.ContextCompacted
 import org.unitedsoftware.alexandrite.sdk.turn.ConversationSealed
 import org.unitedsoftware.alexandrite.sdk.turn.TurnCommitted
 import org.unitedsoftware.alexandrite.sdk.turn.TurnPoints
-import java.util.concurrent.ConcurrentHashMap
 import kotlin.time.Duration.Companion.seconds
 
 /**
  * Batches the words of committed message turns per conversation and captures each batch into its agent's graph, every
  * few turns and at each compaction and seal, on one worker that takes the events in the order they happened. A turn
- * whose actor [MemoryAccess] turns away is left out; what anyone but an operator said is captured tainted.
+ * whose actor [MemoryAccess] turns away is left out; what anyone but an operator said is captured tainted. A compaction
+ * summary is kept, and saved as an episode at the seal, only when the compacting turn is admitted and so was a turn of
+ * its conversation before ([CaptureMarks], kept across restarts).
  *
  * With scenes on, nothing is batched: each committed message turn tells its graph that the conversation has new
  * messages, which the graph reads back from the host's stores, and each seal tells it the conversation is finished.
@@ -47,8 +49,10 @@ internal class TurnCapture(
     private val scenes: SceneHost,
     private val scope: PluginScope,
     private val access: MemoryAccess,
+    files: PluginFiles,
 ) : Lifecycle {
     private val config = config.capture
+    private val marks = CaptureMarks(files.dataDir.resolve(CAPTURE_DIR).resolve("conversations.jsonl"))
     private val events = Channel<Event>(CAPACITY)
     private var worker: Job? = null
 
@@ -57,9 +61,6 @@ internal class TurnCapture(
 
     /** Confined to the worker. */
     private val pending = LinkedHashMap<ConversationId, Batch>()
-
-    /** The conversations where anyone but an operator had a turn, whose summaries are kept tainted. */
-    private val foreign = ConcurrentHashMap.newKeySet<ConversationId>()
 
     /** The last compaction summary of each conversation, confined to the worker. */
     private val summaries = HashMap<ConversationId, Summary>()
@@ -87,8 +88,9 @@ internal class TurnCapture(
 
     suspend fun committed(turn: TurnInfo, entries: List<TranscriptEntry>) {
         if (!config.enabled || !turn.remembers()) return
-        if (taintsMemory(turn.actor)) foreign += turn.conversation
+        if (taintsMemory(turn.actor)) marks.mark(turn.conversation.value, CaptureMarks.Mark.FOREIGN)
         if (!access.admits(turn)) return
+        marks.mark(turn.conversation.value, CaptureMarks.Mark.ADMITTED)
         if (scenes.live) {
             offer(Event.Advanced(turn))
             return
@@ -98,17 +100,24 @@ internal class TurnCapture(
         offer(Event.Committed(turn, lines, taints.tainted(turn) || taintsMemory(turn.actor)))
     }
 
-    /** A summary is written by the model over the whole conversation, so it is as tainted as the conversation. */
+    /**
+     * A summary is written by the model over the whole conversation, so it is as tainted as the conversation; it is kept
+     * only from an admitted turn of a conversation an admitted turn was captured from.
+     */
     suspend fun compacted(turn: TurnInfo, summary: String) {
         if (!config.enabled || turn.lineage != null) return
         val conversation = turn.conversation
-        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || conversation in foreign
-        offer(Event.Compacted(turn, summary, tainted))
+        val kept = access.admits(turn) && marks.has(conversation.value, CaptureMarks.Mark.ADMITTED)
+        val tainted = taints.tainted(conversation) || taintsMemory(turn.actor) || foreign(conversation)
+        offer(Event.Compacted(turn, summary.takeIf { kept }, tainted))
     }
 
     suspend fun sealed(turn: TurnInfo, sealed: ConversationId) {
-        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || sealed in foreign))
+        if (config.enabled && turn.lineage == null) offer(Event.Sealed(turn, sealed, taints.tainted(sealed) || foreign(sealed)))
     }
+
+    /** Whether anyone but an operator had a turn in [conversation], so that its summaries are kept tainted. */
+    private fun foreign(conversation: ConversationId): Boolean = marks.has(conversation.value, CaptureMarks.Mark.FOREIGN)
 
     private fun offer(event: Event) {
         if (events.trySend(event).isSuccess) {
@@ -137,12 +146,12 @@ internal class TurnCapture(
             is Event.Compacted -> {
                 // A later summary is written over the earlier one, so it keeps the earlier one's taint.
                 val tainted = event.tainted || summaries[conversation]?.tainted == true
-                summaries[conversation] = Summary(event.summary, tainted)
+                if (event.summary != null) summaries[conversation] = Summary(event.summary, tainted)
                 if (config.onCompaction) flush(conversation)
             }
 
             is Event.Sealed -> {
-                foreign -= event.sealed
+                marks.forget(event.sealed.value)
                 if (scenes.live) seal(event.turn, event.sealed) else if (config.onSeal) flush(event.sealed)
                 val summary = summaries.remove(event.sealed)
                 if (summary != null && config.episodes) {
@@ -227,13 +236,15 @@ internal class TurnCapture(
 
         class Advanced(override val turn: TurnInfo) : Event
 
-        class Compacted(override val turn: TurnInfo, val summary: String, val tainted: Boolean) : Event
+        /** [summary] is null when it is not kept: only what is pending is captured. */
+        class Compacted(override val turn: TurnInfo, val summary: String?, val tainted: Boolean) : Event
 
         class Sealed(override val turn: TurnInfo, val sealed: ConversationId, val tainted: Boolean) : Event
     }
 
     private companion object {
         const val CAPACITY = 1024
+        const val CAPTURE_DIR = "capture"
         val CANCEL_GRACE = 1.seconds
     }
 }

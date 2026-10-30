@@ -93,10 +93,13 @@ Beyond `docs/API.md`:
 - `putEngram` with an embedding of another dimension than the graph's is `400`. A `400` or `413` on a post means the
   post itself is bad: the client sets it aside (`<name>.rejected.jsonl`) and goes on. Any other failure (`401`, `402`,
   `403`, `429`, `5xx`, no connection) keeps it in the outbox for later, except `404`. A `401` or `403` is a setup error
-  (a refused key) that the client reports until a post lands. The outbox keeps at most 200 000 ops or 128 MiB; past
+  (a refused key) that the client reports until a post lands; met while opening, it opens the device's copy instead,
+  and without one fails with `PleochroicKeyRefusedException`. The outbox keeps at most 200 000 ops or 128 MiB; past
   that, later writes stay on the device only (lost at a restart) and the client reports it, keeping the oldest. The
   rejected posts are kept in `<name>.rejected.jsonl` up to 8 MiB, then in `<name>.rejected.jsonl.1`, replacing the one
   before. The client reads at most 64 MiB of an answer (64 KiB of a streamed answer's error).
 - A `404` to a post or to `/ops?since=` means the graph was deleted on the service. The client never creates it again
   under the deleted graph's ops: it moves its outbox and copy aside (`<name>.outbox.gone-<millis>.jsonl`), stops writing
-  and reports it; a new store (after a restart) starts a new, empty graph.
+  and reports it; a new store (after a restart) starts a new, empty graph. A store that opens to a `404` with writes in
+  its outbox but no create (the graph was deleted while the device was away) moves them and its copy aside the same way
+  first, so that they never meet the `404`.

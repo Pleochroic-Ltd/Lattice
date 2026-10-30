@@ -78,6 +78,18 @@ class SceneNarrationTest {
     }
 
     @Test
+    fun `a scene whose messages no longer read back gets a tainted hub`() {
+        val r = NarrationRig()
+        val s = r.scene("读不回来", listOf("lost|a|a|1"))
+        r.access.withGraph { g -> g.putScene(s.copy(firstMessageId = s.lastMessageId + 1, lastMessageId = s.lastMessageId + 50)) }
+
+        r.ready(s)
+
+        assertEquals(MATERIALIZED, r.state(s))
+        assertTrue(r.hubOf(s)!!.tainted)
+    }
+
+    @Test
     fun `an already materialized scene offered again is a no-op`() {
         val r = NarrationRig()
         val s = r.scene("重复", listOf("dup|a|a|1"))

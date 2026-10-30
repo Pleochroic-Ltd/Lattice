@@ -206,6 +206,32 @@ class SceneTrustTest {
     }
 
     @Test
+    fun `a scene this host cannot read is untrusted, without failing the chat, and judged again later`() {
+        val ok = scene { chat() }
+        val foreign = scene { chat(2) }
+        val messages = source.all(foreign.conversationId)
+        source.forget(foreign.conversationId)
+        val gone = scene { chat(3) }
+        graph.putScene(gone.copy(firstMessageId = gone.lastMessageId + 1, lastMessageId = gone.lastMessageId + 50))
+        val t = trust()
+
+        val result = t.refresh(CHAT)
+
+        assertFalse(result.failed, "another device's scene is not a failed read")
+        assertTrue(result.verdicts.getValue(ok.sceneId).trusted)
+        assertEquals(setOf(Cause.UNREADABLE), result.verdicts.getValue(foreign.sceneId).causes)
+        assertEquals(setOf(Cause.UNREADABLE), result.verdicts.getValue(gone.sceneId).causes)
+        assertEquals(false, graph.sceneTrust(foreign.sceneId))
+        assertEquals(false, graph.sceneTrust(gone.sceneId))
+        assertEquals(setOf(Cause.UNREADABLE), t.judgeMessages(CHAT, emptyList()))
+
+        source.open(foreign.conversationId, CHAT)
+        messages.forEach { source.add(foreign.conversationId, it.text, it.role) }
+        assertTrue(t.refresh(CHAT).verdicts.getValue(foreign.sceneId).trusted, "an unreadable verdict is not kept")
+        assertEquals(true, graph.sceneTrust(foreign.sceneId))
+    }
+
+    @Test
     fun `refresh caches the chat's ended scenes on the graph, not an open one`() {
         val trusted = scene { chat() }
         val untrusted = scene { add("$CHAT:s2", "<html>", Role.TOOL, toolName = "web.view") }

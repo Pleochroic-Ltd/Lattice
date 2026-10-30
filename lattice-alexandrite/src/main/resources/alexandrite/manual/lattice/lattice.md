@@ -8,8 +8,11 @@ Each agent has one memory graph, shared by all its chats, so what one chat said 
 decides who reaches it: by default only the agent's operators (whom their channel counts operators in the chat), or
 also trusted users (`trusted`: whom the channel trusts in the chat, or who are named in `scenes.trustedSenders`), or
 everyone (`everyone`). A turn whose sender is below that level gets no recall and no period catalogue, is not captured,
-and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. A turn
-with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`. Whatever anyone but an
+and the memory tools refuse it; the tools are still offered, since a plugin's tools are the same for every turn. With
+scenes on, such a turn is left out of the scenes whole, the agent's answer in it included, and so is a turn where anyone
+below the level wrote; a scene with such a gap is untrusted. A turn with no sender, such as a heartbeat or a reminder, reaches the memory only at `everyone`.
+A compaction summary is kept only when the turn that compacted reaches the memory and an earlier turn of the
+conversation did; it is saved tainted when anyone but an operator had a turn in the conversation, also before a restart. Whatever anyone but an
 operator says or saves is kept tainted, so it never comes back as trusted content.
 
 Before a message turn, Lattice recalls what the message brings
@@ -24,15 +27,17 @@ summary is kept as an episode.
 
 With scenes on, Lattice captures a conversation scene by scene instead: after each message turn it reads the
 conversation back from Alexandrite's stores, cuts what has gathered into scenes (stretches of one topic or one
-occasion), extracts the memories of each ended scene, and writes a short summary of it that recall can bring back. A
+occasion), extracts the memories of each ended scene, and writes a short summary of it that recall can bring back. What
+a scene says after untrusted content is extracted tainted too, since the agent may repeat it. A
 conversation sealed with `/new` is cut to its end. Heartbeats and sub-agent runs stay out of a chat's scenes. Whatever
 a turn or a seal leaves uncut is caught up in the nightly sleep.
 
 A scene is trusted only when everyone who wrote in it is an operator of the chat (what anyone else says is tainted),
 every tool result in it comes from a read-only tool or one that changes only the agent's own
 state (or a tool named in `scenes.trustedTools`), none of it was forwarded, quoted unverified or written after the
-conversation took in untrusted content, and no tool in it replayed stored conversation text, such as `history.search`.
-Lattice learns each tool's risk when a turn offers it.
+conversation took in untrusted content, no tool in it replayed stored conversation text, such as `history.search`, and
+this device can read it back: a scene that another device wrote into a shared Pleochroic graph is untrusted here. Lattice
+learns each tool's risk when a turn offers it.
 
 Once a chat's scenes have settled, Lattice groups them into periods (named stretches of what happened, such as a trip
 or a project) and older periods into eras, and writes the chat's period catalogue: its eras and periods in a few
@@ -78,8 +83,9 @@ Lattice reads `plugins.lattice`:
   and as soon as one of its own writes finds some, and then reloads its graph. A graph deleted on Pleochroic is not
   made again: the device logs it once as an error, stops writing to it and keeps its unsent writes aside in its state
   directory; after a restart it starts a new, empty graph. A key that Pleochroic refuses is logged once as an error;
-  writes wait on the device meanwhile, up to 200 000 operations or 128 MiB, past which later ones stay on the device
-  only until the backlog is sent, and are lost at a restart.
+  the graph opens from the copy on the device, or, without one, stays closed and is tried again at its next use, less
+  and less often (up to every 10 minutes). Writes wait on the device meanwhile, up to 200 000 operations or 128 MiB,
+  past which later ones stay on the device only until the backlog is sent, and are lost at a restart.
 - `embedder.kind`: `openai` for an OpenAI-compatible embeddings API (`baseUrl`, `model`, `apiKey`, `dimension`), or
   `pleochroic`. A graph keeps the embedding model it was made with.
 - `model.kind`: `host` for one of the host's model endpoints (`default` as `<endpoint>/<model>`, and `tasks` to give a

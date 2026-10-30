@@ -41,7 +41,9 @@ import java.util.concurrent.RejectedExecutionException
  * Whenever a scene finishes (MATERIALIZED or ABANDONED) the chat is drained: the next scenes in order that are
  * NARRATING (or OPEN) are narrated right away, until one is not ready or fails, so a scene held back by the ordering
  * rule does not wait for the next sleep. When the drain stops, [onChatDrained] is told — inline, in the same task.
- * A scene the pipeline did not write (no [SceneWorkRecord]) counts as done.
+ * A scene the pipeline did not write (no [SceneWorkRecord]) counts as done. A scene whose conversation this host does not
+ * have (another device's, in a shared graph) is that device's to narrate: it is never narrated here, and holds the
+ * chat's later scenes back like any scene not yet done.
  */
 internal class SceneHubNarration(
     private val graph: GraphAccess,
@@ -115,6 +117,7 @@ internal class SceneHubNarration(
     @Synchronized
     fun sceneReady(sceneId: Long) {
         val current = current(sceneId)?.takeIf { it.narratable() } ?: return
+        if (!hosted(current.scene)) return
         if (!earlierScenesDone(current.scene)) {
             logger.debug("Scene narration held back by an earlier scene: scene={} chat={}", sceneId, current.scene.chatKey)
             return
@@ -140,12 +143,18 @@ internal class SceneHubNarration(
                     g.sceneWork(s.sceneId)?.takeIf { !it.state.done }?.let { Current(s, it) }
                 }
             } ?: return
-            if (!next.narratable()) return
+            if (!next.narratable() || !hosted(next.scene)) return
             if (blockedBefore(next.scene)) return
             if (!visited.add(next.scene.sceneId)) return // its state did not move (a concurrent change): stop, never spin
             if (narrate(next) != Outcome.FINISHED) return
         }
     }
+
+    /** Whether this host has the scene's conversation; a read that fails says no (the scene is offered again). */
+    private fun hosted(scene: SceneRecord): Boolean =
+        runCatching { source.conversation(scene.conversationId) != null }.getOrDefault(false).also {
+            if (!it) logger.debug("Scene narration left to the device that has its conversation: scene={}", scene.sceneId)
+        }
 
     private val SceneWorkState.done: Boolean get() = this == SceneWorkState.MATERIALIZED || this == SceneWorkState.ABANDONED
 
@@ -217,7 +226,8 @@ internal class SceneHubNarration(
                 // is not worth an embedding.
                 val text = result.narration.trim()
                 val vector = if (EpisodeNarrator.withinNarrationBand(text)) embedder.embed(text) else null
-                val tainted = messages.any { it.tainted }
+                // Messages that do not read back vouch for nothing: the hub is tainted.
+                val tainted = messages.isEmpty() || messages.any { it.tainted }
                 graph.withGraph { g ->
                     val record = (g.scene(scene.sceneId) ?: scene).copy(inProgress = inProgress)
                     if (vector != null) {
