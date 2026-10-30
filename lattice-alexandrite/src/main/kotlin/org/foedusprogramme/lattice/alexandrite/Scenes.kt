@@ -60,12 +60,24 @@ internal class SceneHost(
     val live: Boolean = scenes.enabled && transcripts != null && conversations != null
 
     override suspend fun onStart() {
-        if (scenes.enabled && !live) {
-            logger.warn(
-                "Scenes are on, but the host binds no transcript or conversation store, so conversations are captured " +
-                    "in batches of turns instead",
-            )
-        }
+        storesWarning()?.let { logger.warn(it) }
+    }
+
+    /**
+     * What Lattice goes without when the host binds no conversation or transcript store: the SDK reserves them for the
+     * agent, so a host may keep them from plugins. Null when both are bound.
+     */
+    fun storesWarning(): String? {
+        val missing = listOfNotNull(
+            "conversation store".takeIf { conversations == null },
+            "transcript store".takeIf { transcripts == null },
+        )
+        if (missing.isEmpty()) return null
+        val effects = listOfNotNull(
+            "every captured turn and summary counts as tainted".takeIf { conversations == null },
+            "conversations are captured in batches of turns instead of scenes".takeIf { scenes.enabled },
+        ).ifEmpty { listOf("scenes cannot be turned on") }
+        return "The host binds no ${missing.joinToString(" and ")} to plugins, so ${effects.joinToString(" and ")}"
     }
 
     /** The source and trust policy of the graph [graph], null when scenes do not run. */

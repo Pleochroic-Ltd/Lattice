@@ -139,4 +139,9 @@ Scenes on, with recall that shows when things were said, added to a config like 
 }
 ```
 
+Lattice reads the conversations back from Alexandrite's conversation and transcript stores, which the SDK reserves for
+the agent itself. A host that does not bind them to plugins is told once at start, in the log: without the conversation
+store every captured turn and summary counts as tainted, and without either store scenes do not run and conversations
+are captured in batches of turns.
+
 A config change needs a restart. Keys the plugin does not know stop the start with a message that names them.

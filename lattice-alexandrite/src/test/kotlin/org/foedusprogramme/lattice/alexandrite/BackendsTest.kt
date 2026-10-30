@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Clock
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -43,6 +44,27 @@ class BackendsTest {
 
         assertIs<AlexandriteConversationSource>(dependencies.conversations)
         assertIs<AlexandriteSceneTrustPolicy>(dependencies.sceneTrust)
+    }
+
+    @Test
+    fun `a host that binds no store is told once at start, with what Lattice goes without`() {
+        fun warning(extra: String, transcripts: Boolean, conversations: Boolean): String? = SceneHost(
+            Json.decodeFromString(LatticeConfig.serializer(), config(extra)),
+            files,
+            store.transcripts.takeIf { transcripts },
+            store.conversations.takeIf { conversations },
+        ).storesWarning()
+
+        assertNull(warning("{}", transcripts = true, conversations = true))
+        assertEquals(
+            "The host binds no conversation store and transcript store to plugins, so every captured turn and summary " +
+                "counts as tainted and conversations are captured in batches of turns instead of scenes",
+            warning(SCENES_ON, transcripts = false, conversations = false),
+        )
+        assertEquals(
+            "The host binds no transcript store to plugins, so scenes cannot be turned on",
+            warning("{}", transcripts = false, conversations = true),
+        )
     }
 
     @Test

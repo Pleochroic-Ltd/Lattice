@@ -241,20 +241,12 @@ internal class TurnCapture(
 /** Whether a turn's conversation took in untrusted content, as the conversation store marks it. */
 @Singleton
 internal class TurnTaints(private val conversations: ConversationStore?) {
-    @Volatile
-    private var warned = false
-
-    /** True also when the store cannot tell. */
+    /** True also when the store cannot tell, or the host binds none ([SceneHost.storesWarning] says so at start). */
     suspend fun tainted(turn: TurnInfo): Boolean = tainted(turn.conversation)
 
     /** Whether [conversation] took in untrusted content, true also when the store cannot tell. */
     suspend fun tainted(conversation: ConversationId): Boolean {
-        val store = conversations
-        if (store == null) {
-            if (!warned) logger.warn("No conversation store is bound, so every captured turn counts as tainted")
-            warned = true
-            return true
-        }
+        val store = conversations ?: return true
         return try {
             store.taint(conversation) != null
         } catch (e: CancellationException) {
