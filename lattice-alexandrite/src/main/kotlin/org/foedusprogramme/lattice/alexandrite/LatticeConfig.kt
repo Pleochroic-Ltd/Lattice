@@ -144,7 +144,12 @@ internal class StorageConfig(
             "storage.pullSeconds must be between $MIN_PULL_SECONDS and $MAX_PULL_SECONDS."
         }
         require(graphPrefix == null || GRAPH_PREFIX.matches(graphPrefix)) {
-            "storage.graphPrefix may hold only lowercase letters, digits and '-', such as \"home-\"."
+            "storage.graphPrefix must start with a lowercase letter or digit and hold only lowercase letters, digits " +
+                "and '-', such as \"home-\"."
+        }
+        require(graphPrefix == null || graphPrefix.length < MAX_GRAPH_NAME) {
+            "storage.graphPrefix is ${graphPrefix?.length} characters long, which leaves no room for the agent id in " +
+                "Pleochroic's $MAX_GRAPH_NAME: shorten it."
         }
     }
 
@@ -152,8 +157,16 @@ internal class StorageConfig(
     val pullInterval: Duration?
         get() = if (kind == PLEOCHROIC) (pullSeconds ?: DEFAULT_PULL_SECONDS).seconds else null
 
-    /** The name of [agent]'s graph where it is stored. */
-    fun graphName(agent: String): String = (graphPrefix ?: "") + agent
+    /** The name of [agent]'s graph where it is stored; throws when it is longer than Pleochroic takes. */
+    fun graphName(agent: String): String {
+        val name = (graphPrefix ?: "") + agent
+        require(name.length <= MAX_GRAPH_NAME) {
+            "The memory of agent '$agent' would be the Pleochroic graph '$name', ${name.length} characters long, over " +
+                "Pleochroic's $MAX_GRAPH_NAME: shorten storage.graphPrefix to at most ${MAX_GRAPH_NAME - agent.length} " +
+                "characters."
+        }
+        return name
+    }
 }
 
 @Serializable
@@ -477,6 +490,8 @@ private const val DEFAULT_PULL_SECONDS = 300
 private const val MIN_PULL_SECONDS = 10
 private const val MAX_PULL_SECONDS = 86_400
 
-private val GRAPH_PREFIX = Regex("[a-z0-9-]*")
+/** A prefix of a Pleochroic graph name, `^[a-z0-9][a-z0-9-]{0,62}$`; the agent id follows it. */
+private val GRAPH_PREFIX = Regex("([a-z0-9][a-z0-9-]*)?")
+private const val MAX_GRAPH_NAME = 63
 
 private val CLOCK_TIME = DateTimeFormatter.ofPattern("HH:mm")

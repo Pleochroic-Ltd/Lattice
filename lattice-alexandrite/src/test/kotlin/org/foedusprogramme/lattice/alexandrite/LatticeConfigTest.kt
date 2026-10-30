@@ -219,6 +219,21 @@ class LatticeConfigTest {
     }
 
     @Test
+    fun `a graph prefix starts with a letter or digit and leaves room for the agent id`() {
+        val pleochroic = """"pleochroic": {"baseUrl": "https://x.example", "apiKey": "k"}"""
+        fun prefix(value: String) = config("""{"storage": {"kind": "pleochroic", "graphPrefix": "$value"}, $pleochroic}""")
+
+        assertContains(refused(prefix("-home")), "storage.graphPrefix must start with a lowercase letter or digit")
+        assertContains(refused(prefix("Home-")), "storage.graphPrefix must start with a lowercase letter or digit")
+        assertContains(refused(prefix("a".repeat(63))), "leaves no room for the agent id")
+        val storage = decode(prefix("a".repeat(60))).storage
+        assertEquals("a".repeat(60) + "abc", storage.graphName("abc"))
+        val e = assertFailsWith<IllegalArgumentException> { storage.graphName("main") }
+        assertContains(e.message.orEmpty(), "shorten storage.graphPrefix to at most 59 characters")
+        assertEquals("main", decode(prefix("")).storage.graphName("main"))
+    }
+
+    @Test
     fun `recall, capture, sleep and zone values are checked`() {
         assertContains(refused(config("""{"recall": {"limit": 0}}""")), "recall.limit must be between 1 and 50")
         assertContains(refused(config("""{"recall": {"language": "EN_us"}}""")), "recall.language must be a BCP 47 tag")

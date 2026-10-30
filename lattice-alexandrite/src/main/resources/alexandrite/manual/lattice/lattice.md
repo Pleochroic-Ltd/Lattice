@@ -72,7 +72,8 @@ Lattice reads `plugins.lattice`:
 - `access`: `operators` (the default), `trusted` or `everyone`: the least a turn's sender must be for the memory to be
   recalled into, captured from, searched, saved to or shown in the turn.
 - `storage.kind`: `local` keeps each agent's graph in a SQLite file in the plugin's data directory; `pleochroic` keeps
-  it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>`. A Pleochroic graph can be shared by
+  it on the Pleochroic service, as the graph `<storage.graphPrefix><agent id>` (lowercase letters, digits and `-`,
+  starting with a letter or digit, at most 63 characters in all). A Pleochroic graph can be shared by
   several devices: each pulls what the others wrote every `storage.pullSeconds` (300 by default) and before each sleep,
   and as soon as one of its own writes finds some, and then reloads its graph. A graph deleted on Pleochroic is not
   made again: the device logs it once as an error, stops writing to it and keeps its unsent writes aside in its state
