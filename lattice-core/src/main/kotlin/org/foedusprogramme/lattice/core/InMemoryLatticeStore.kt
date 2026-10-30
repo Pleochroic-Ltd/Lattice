@@ -414,8 +414,9 @@ class InMemoryLatticeStore(
     override fun batch(block: (LatticeStore) -> Unit) = write { block(this) }
 
     /**
-     * Takes in rows written elsewhere (a remote op log) as they are: no constraint is checked and [onChange] hears
-     * nothing. A deleted engram still takes its dependents with it. Follow with [repair] once a run of changes is in.
+     * Takes in rows written elsewhere (a remote op log) as they are: no constraint is checked, nothing cascades and
+     * [onChange] hears nothing. A deleted engram leaves what names it dangling, so follow a run of changes with
+     * [repair], which deletes those rows and reports them: the writer may not have known them.
      */
     fun applyRemote(changes: List<Change>) = lock.withLock {
         val wasSilent = silent
@@ -424,7 +425,6 @@ class InMemoryLatticeStore(
             for (change in changes) {
                 val row = change.row
                 when {
-                    change.removed && row is Row.EngramRow -> deleteEngramCascade(row.engram.id)
                     change.removed -> tableOf(row).remove(row.key)
                     row is Row.EngramRow -> engrams.put(Row.EngramRow(row.engram.snapshot()))
                     else -> tableOf(row).putAny(row)
