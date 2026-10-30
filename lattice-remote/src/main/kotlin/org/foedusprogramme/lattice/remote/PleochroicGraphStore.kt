@@ -212,8 +212,10 @@ class PleochroicGraphStore(
                 if (!transient(e)) throw e
                 logger.warn("Graph '{}' couldn't pull other devices' writes: {}", graphName, e.message)
             }
-            if (options.cacheSnapshot) writeCache()
-            notice.also { notice = RemoteChanges.NONE }
+            val found = notice
+            notice = RemoteChanges.NONE
+            if (options.cacheSnapshot && !found.isEmpty) writeCache()
+            found
         } finally {
             pulling = false
         }
