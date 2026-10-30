@@ -1,0 +1,49 @@
+{
+  "language": "Chinese",
+  "memories": [
+    {
+      "ref": "m1",
+      "content": "阿远说他其实也是第一次来这家店，菜单是在门口当场用手机查的。",
+      "salience": 0.7,
+      "layer": "SEMANTIC",
+      "quotes": [
+        {
+          "speaker": "user",
+          "text": "我也没来过这家呀，不是跟你说过了吗？"
+        }
+      ]
+    },
+    {
+      "ref": "m2",
+      "content": "阿远坚持让我先尝第一口，说想看我第一次吃到"正宗的拉面"是什么表情。",
+      "salience": 0.9,
+      "arousal": 0.8,
+      "layer": "EPISODIC",
+      "event_date": "2025-05-17"
+    },
+    {
+      "ref": "m3",
+      "content": "我因为阿远记得"每周三晚上、雷打不动的夜跑"这件事而很感动，这是我想记住的瞬间。",
+      "salience": 0.95,
+      "arousal": 0.9,
+      "layer": "EPISODIC",
+      "event_date": "2025-05-17",
+      "quotes": [
+        {
+          "speaker": "assistant",
+          "text": "你说"记得"这两个字的时候，我真的很开心。"
+        }
+      ]
+    },
+    {
+      "ref": "m4",
+      "content": "我们约好下次一起去看海。",
+      "salience": 0.6,
+      "layer": "EPISODIC"
+    }
+  ],
+  "relations": [
+    {"from": "m2", "to": "m3", "type": "CAUSAL"},
+    {"from": "m1", "to": "m2", "type": "CAUSAL"}
+  ]
+}
