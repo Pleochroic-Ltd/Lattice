@@ -268,6 +268,41 @@ class PleochroicGraphStoreTest {
     }
 
     @Test
+    fun `a full outbox keeps the oldest writes, says so, and takes writes again once it drained`() {
+        val store = store(options = PleochroicGraphStore.Options(minRetryDelay = Duration.ofMinutes(1), maxOutboxOps = 3))
+            .also { it.declareEmbedding(SPEC) }
+        server.down = true
+        (1L..5L).forEach { store.putEngram(engram(it)) }
+
+        assertEquals(3, store.pendingWrites)
+        assertContains(store.failure.orEmpty(), "as many writes waiting for Pleochroic as its outbox keeps")
+        assertEquals((1L..5L).toSet(), store.load().engrams.map { it.id }.toSet(), "the device still has them all")
+
+        server.down = false
+        assertTrue(store.flush())
+        assertNull(store.failure)
+        assertEquals(setOf(1L, 2L, 3L), server.graph(GRAPH)!!.engramIds)
+        store.putEngram(engram(6))
+        assertEquals(setOf(1L, 2L, 3L, 6L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
+    fun `a refused key keeps the writes in the outbox and is named as a setup error until a post lands`() {
+        val store = store().also { it.declareEmbedding(SPEC) }
+        server.unauthorizedNextOps = 2
+        store.putEngram(engram(1))
+
+        assertEquals(1, store.pendingWrites)
+        assertContains(store.failure.orEmpty(), "Pleochroic refused the API key")
+        assertFalse(store.flush())
+        assertContains(store.failure.orEmpty(), "Pleochroic refused the API key")
+
+        assertTrue(store.flush())
+        assertNull(store.failure)
+        assertEquals(setOf(1L), server.graph(GRAPH)!!.engramIds)
+    }
+
+    @Test
     fun `a post refused as malformed is set aside and the rest goes on`() {
         val store = store().also { it.declareEmbedding(SPEC) }
         server.rejectNextOps = 1
