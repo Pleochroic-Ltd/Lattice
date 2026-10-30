@@ -2809,6 +2809,9 @@ class LatticeGraph(
      */
     fun threadStatusOf(id: Long): ThreadStatus = sceneIndex.threadStatusOf(id)
 
+    /** Whether [thread]'s name or description may carry untrusted text (see [SceneIndex.threadTextTainted]). */
+    fun threadTextTainted(thread: ThreadRecord): Boolean = sceneIndex.threadTextTainted(thread)
+
     // --- PERIODS side-store (delegates to [PeriodIndex]) -----------------------------------------
 
     /** A fresh period id for a [PeriodWrite] (ids of a write that is never committed are simply skipped). */

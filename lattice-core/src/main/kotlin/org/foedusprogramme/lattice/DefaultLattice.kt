@@ -339,7 +339,13 @@ internal class DefaultLattice(
         onGraphBounded { g ->
             val hits = dispatchTemporal(g, cue, options.limit ?: settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
             val text = RecallFormatter.format(hits, markers, g.temporalLayerEnabled, lookup(g, language), settings.userName, dating)
-            val tainted = hits.any { h -> h.engram.tainted || g.evidenceQuotes(h.engram.id).any { it.tainted } }
+            // Beyond the hits and their quotes the block shows thread names, written by a scene's narration; a scene
+            // title rides only its own hub and a period name only a trusted scene.
+            val tainted = hits.any { h ->
+                val id = h.engram.id
+                h.engram.tainted || g.evidenceQuotes(id).any { it.tainted } ||
+                    g.threadStatusOf(id).let { s -> (s.closed + s.open).any(g::threadTextTainted) }
+            }
             Recall(text, hits.map(::recallHit), tainted)
         }
     }

@@ -264,6 +264,18 @@ internal class SceneIndex(
         return LatticeGraph.ThreadStatus(closed, open)
     }
 
+    /**
+     * Whether thread [t]'s name or description may carry untrusted text. Both come from the narration of the scene that
+     * opened it, so they are as tainted as that scene's hub, which takes the narration's taint before the ledger
+     * applies. With no hub to tell (no known opening scene, no hub, or a scene given up: its ledger may come from a
+     * failed attempt whose reading nothing records) the thread counts as tainted.
+     */
+    fun threadTextTainted(t: ThreadRecord): Boolean {
+        val scene = t.openedSceneId?.let(scenesById::get) ?: return true
+        if (workByScene[scene.sceneId]?.state == SceneWorkState.ABANDONED) return true
+        return scene.hubEngramId?.let(graph::engram)?.tainted ?: true
+    }
+
     private fun cacheThread(row: ThreadRecord) {
         val old = threadsById.put(row.id, row)
         if (old?.state == ThreadState.CLOSED) closedThreads--
