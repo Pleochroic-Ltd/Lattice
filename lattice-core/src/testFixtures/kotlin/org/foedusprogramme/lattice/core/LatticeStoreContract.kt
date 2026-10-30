@@ -527,7 +527,8 @@ abstract class LatticeStoreContract {
 
         store.deletePeriodLayer(CHAT)
 
-        val loaded = store.reopened().load()
+        val reopened = store.reopened()
+        val loaded = reopened.load()
         assertEquals(4, loaded.scenes.size)
         for (rows in listOf(
             loaded.eras.map { it.chatKey }, loaded.eraAliases.map { it.chatKey }, loaded.periods.map { it.chatKey },
@@ -538,7 +539,7 @@ abstract class LatticeStoreContract {
             assertEquals(listOf(OTHER_CHAT), rows)
         }
         assertEquals(listOf(PeriodMemberRecord(101, 120)), loaded.periodMembers)
-        store.putPeriod(PeriodRecord(20, CHAT, "甲", state = PeriodState.PROVISIONAL))
+        reopened.putPeriod(PeriodRecord(20, CHAT, "甲", state = PeriodState.PROVISIONAL))
     }
 
     @Test
@@ -577,11 +578,12 @@ abstract class LatticeStoreContract {
                 s.putPeriod(PeriodRecord(11, CHAT, "乙", state = PeriodState.PROVISIONAL))
             }
         }
-        val loaded = store.reopened().load()
+        val reopened = store.reopened()
+        val loaded = reopened.load()
         assertEquals(listOf(1L), loaded.engrams.map { it.id })
         assertEquals(listOf(EdgeRecord(1, 1, Edge.Type.SEMANTIC, 0.1, T0)), loaded.edges)
         assertTrue(loaded.periods.isEmpty())
-        store.putPeriod(PeriodRecord(10, CHAT, "甲", state = PeriodState.PROVISIONAL))
+        reopened.putPeriod(PeriodRecord(10, CHAT, "甲", state = PeriodState.PROVISIONAL))
     }
 
     @Test
