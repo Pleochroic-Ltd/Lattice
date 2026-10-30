@@ -17,6 +17,8 @@ object NoOpLatticeStore : LatticeStore {
     override fun markEntityResolved(engramId: Long) = Unit
     override fun mergeEntities(fromId: Long, toId: Long) = Unit
     override fun putScene(scene: SceneRecord) = Unit
+    override fun putSceneWork(work: SceneWorkRecord) = Unit
+    override fun putSceneCursor(cursor: SceneCursorRecord) = Unit
     override fun putSceneMember(sceneId: Long, engramId: Long) = Unit
     override fun redirectSceneMembers(fromEngramId: Long, toEngramId: Long) = Unit
     override fun putThread(thread: ThreadRecord) = Unit

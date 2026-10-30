@@ -20,6 +20,8 @@ open class TestLatticeStore(
     val resolved = LinkedHashSet<Long>()
     val scenes = LinkedHashMap<Long, SceneRecord>()
     val sceneMembers = LinkedHashSet<Pair<Long, Long>>()
+    val sceneWork = LinkedHashMap<Long, SceneWorkRecord>()
+    val sceneCursors = LinkedHashMap<String, SceneCursorRecord>()
     val threads = LinkedHashMap<Long, ThreadRecord>()
     val threadLinks = LinkedHashSet<ThreadLinkRecord>()
     val periods = LinkedHashMap<Long, PeriodRecord>()
@@ -42,6 +44,8 @@ open class TestLatticeStore(
         resolved += initial.resolvedEntityIds
         initial.scenes.forEach { scenes[it.sceneId] = it }
         sceneMembers += initial.sceneMembers
+        initial.sceneWork.forEach { sceneWork[it.sceneId] = it }
+        initial.sceneCursors.forEach { sceneCursors[it.conversationId] = it }
         initial.threads.forEach { threads[it.id] = it }
         threadLinks += initial.threadLinks
         initial.periods.forEach { periods[it.id] = it }
@@ -76,6 +80,8 @@ open class TestLatticeStore(
         resolvedEntityIds = resolved.toSet(),
         scenes = scenes.values.toList(),
         sceneMembers = sceneMembers.toList(),
+        sceneWork = sceneWork.values.toList(),
+        sceneCursors = sceneCursors.values.toList(),
         threads = threads.values.toList(),
         threadLinks = threadLinks.toList(),
         periods = periods.values.toList(),
@@ -146,6 +152,16 @@ open class TestLatticeStore(
     override fun putScene(scene: SceneRecord) {
         count("putScene")
         scenes[scene.sceneId] = scene
+    }
+
+    override fun putSceneWork(work: SceneWorkRecord) {
+        count("putSceneWork")
+        sceneWork[work.sceneId] = work
+    }
+
+    override fun putSceneCursor(cursor: SceneCursorRecord) {
+        count("putSceneCursor")
+        sceneCursors[cursor.conversationId] = cursor
     }
 
     override fun putSceneMember(sceneId: Long, engramId: Long) {

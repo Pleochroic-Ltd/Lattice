@@ -90,6 +90,6 @@ class GraphWireTest {
         val b = copy.load()
         assertEquals(a.copy(engrams = emptyList()), b.copy(engrams = emptyList()))
         a.engrams.forEach { e -> assertEngram(e, b.engrams.single { it.id == e.id }) }
-        assertTrue(a.periods.isNotEmpty())
+        assertTrue(a.periods.isNotEmpty() && a.sceneWork.isNotEmpty() && a.sceneCursors.isNotEmpty())
     }
 }

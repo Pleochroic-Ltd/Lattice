@@ -42,8 +42,10 @@ whole row; a reader decodes a put from `data` and a delete from the key.
 | `entity` | `id` | `id, canonicalName, nameLc, mentionCount, firstEventDate?` |
 | `entityLink` | `engramId/entityId` | `engramId, entityId` |
 | `entityResolved` | `engramId` | `engramId` |
-| `scene` | `sceneId` | `sceneId, title, conversationId, chatKey, firstMessageId, lastMessageId, dateFrom?, dateTo?, inProgress, hubEngramId?` |
+| `scene` | `sceneId` | `sceneId, title, conversationId, chatKey, firstMessageId, lastMessageId, dateFrom?, dateTo?, inProgress, hubEngramId?, startedAt?, seq` |
 | `sceneMember` | `sceneId/engramId` | `sceneId, engramId` |
+| `sceneWork` | `sceneId` | `sceneId, state, synopsis?, extractedThrough?, extractAttempts, chunksDone, chunksFailed, narrateAttempts` (the scene pipeline's state of a scene) |
+| `sceneCursor` | `conversationId` | `conversationId, chatKey, segmentedThrough?, segmentAttempts, fallbackThrough?, extractAttempts, blockedSince?, finished` (its progress through a conversation) |
 | `thread` | `id` | `id, chatKey, description, state, openedSceneId?, closedSceneId?, staleCount, name?` |
 | `threadLink` | `threadId/engramId/role` | `threadId, engramId, role` |
 | `period` | `id` | `id, chatKey, name, gist?, state, eraId?, needsRename, namingSceneIds[], dateFrom?, dateTo?` |

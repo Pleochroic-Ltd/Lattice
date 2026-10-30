@@ -58,6 +58,12 @@ data class SceneSettings(
     val narrationCheck: String = "anchors",
     val segmentWindowMessages: Int = 200,
     val segmentLookaheadMessages: Int = 20,
+    /**
+     * Messages a live conversation gathers past its last scene, besides the lookahead it keeps back, before they are
+     * segmented: one segmentation call per this many messages. A seal and the sleep's catch-up segment whatever is
+     * left.
+     */
+    val segmentBatchMessages: Int = 60,
     val openTailMessages: Int = 6,
     val segmentBodyChars: Int = 300,
     val cutMaxShiftRatio: Double = 0.30,
@@ -75,4 +81,8 @@ data class LatticeDependencies(
     val texts: MemoryTexts,
     val deadLetter: MemoryDeadLetter = MemoryDeadLetter.NoOp,
     val clock: Clock = Clock.systemUTC(),
+    /** The host's conversations, read back for scenes; null = no scenes, whatever [SceneSettings.enabled] says. */
+    val conversations: ConversationSource? = null,
+    /** Whose words and which tools' results a scene's content may be trusted with (periods name trusted scenes only). */
+    val sceneTrust: SceneTrustPolicy = SceneTrustPolicy.Conservative,
 )

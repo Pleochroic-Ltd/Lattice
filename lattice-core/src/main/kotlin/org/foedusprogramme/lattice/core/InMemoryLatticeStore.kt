@@ -59,6 +59,14 @@ class InMemoryLatticeStore(
             override val key: Any get() = sceneId to engramId
         }
 
+        data class SceneWorkRow(val record: SceneWorkRecord) : Row {
+            override val key: Any get() = record.sceneId
+        }
+
+        data class SceneCursorRow(val record: SceneCursorRecord) : Row {
+            override val key: Any get() = record.conversationId
+        }
+
         data class ThreadRow(val record: ThreadRecord) : Row {
             override val key: Any get() = record.id
         }
@@ -131,6 +139,8 @@ class InMemoryLatticeStore(
     private val resolved = Table<Row.ResolvedRow>()
     private val scenes = Table<Row.SceneRow> { listOfNotNull(it.record.hubEngramId) }
     private val sceneMembers = Table<Row.SceneMemberRow> { listOf(it.sceneId, it.engramId) }
+    private val sceneWork = Table<Row.SceneWorkRow>()
+    private val sceneCursors = Table<Row.SceneCursorRow>()
     private val threads = Table<Row.ThreadRow>()
     private val threadLinks = Table<Row.ThreadLinkRow> { listOf(it.record.threadId, it.record.engramId) }
     private val periods = Table<Row.PeriodRow> { listOfNotNull(it.record.chatKey, it.record.eraId) }
@@ -167,6 +177,8 @@ class InMemoryLatticeStore(
             resolvedEntityIds = resolved.rows.values.mapTo(LinkedHashSet()) { it.engramId },
             scenes = scenes.rows.values.map { it.record },
             sceneMembers = sceneMembers.rows.values.map { it.sceneId to it.engramId },
+            sceneWork = sceneWork.rows.values.map { it.record },
+            sceneCursors = sceneCursors.rows.values.map { it.record },
             threads = threads.rows.values.map { it.record },
             threadLinks = threadLinks.rows.values.map { it.record },
             periods = periods.rows.values.map { it.record },
@@ -249,6 +261,13 @@ class InMemoryLatticeStore(
         scene.hubEngramId?.let { requireEngram(it, "scene ${scene.sceneId}'s hub") }
         scenes.put(Row.SceneRow(scene))
     }
+
+    override fun putSceneWork(work: SceneWorkRecord) = write {
+        requireScene(work.sceneId, "its work state")
+        sceneWork.put(Row.SceneWorkRow(work))
+    }
+
+    override fun putSceneCursor(cursor: SceneCursorRecord) = write { sceneCursors.put(Row.SceneCursorRow(cursor)) }
 
     override fun putSceneMember(sceneId: Long, engramId: Long) = write {
         requireScene(sceneId, "the membership of engram $engramId")
@@ -444,8 +463,8 @@ class InMemoryLatticeStore(
 
     /**
      * Drops or detaches rows that name a row that isn't there, as the SQLite store's foreign keys would have: edges,
-     * entity links, resolved markers, scene and period memberships, thread links of a missing thread, aliases of a
-     * missing period or era; a missing hub or era is cleared. Changes are reported to [onChange]. Only rows taken in
+     * entity links, resolved markers, scene and period memberships, scene work of a missing scene, thread links of a
+     * missing thread, aliases of a missing period or era; a missing hub or era is cleared. Changes are reported to [onChange]. Only rows taken in
      * through [applyRemote] can dangle.
      */
     fun repair() = write {
@@ -458,6 +477,7 @@ class InMemoryLatticeStore(
             .forEach { scenes.put(Row.SceneRow(it.record.copy(hubEngramId = null))) }
         sceneMembers.rows.values.filter { it.engramId !in engramIds || scenes.get(it.sceneId) == null }
             .forEach { sceneMembers.remove(it.key) }
+        sceneWork.rows.values.filter { scenes.get(it.record.sceneId) == null }.forEach { sceneWork.remove(it.key) }
         threadLinks.rows.values.filter { threads.get(it.record.threadId) == null }.forEach { threadLinks.remove(it.key) }
         periods.rows.values.filter { it.record.eraId?.let { era -> eras.get(era) == null } == true }
             .forEach { periods.put(Row.PeriodRow(it.record.copy(eraId = null))) }
@@ -471,7 +491,8 @@ class InMemoryLatticeStore(
     fun rows(): List<Row> = lock.withLock {
         listOf(
             engrams, entities, scenes, threads, eras, periods, edges, verdicts, entityLinks, resolved, sceneMembers,
-            threadLinks, periodMembers, periodAliases, eraAliases, exclusions, failures, generations, catalogues,
+            sceneWork, sceneCursors, threadLinks, periodMembers, periodAliases, eraAliases, exclusions, failures,
+            generations, catalogues,
         ).flatMap { it.rows.values.toList() }
     }
 
@@ -484,6 +505,8 @@ class InMemoryLatticeStore(
         is Row.ResolvedRow -> resolved
         is Row.SceneRow -> scenes
         is Row.SceneMemberRow -> sceneMembers
+        is Row.SceneWorkRow -> sceneWork
+        is Row.SceneCursorRow -> sceneCursors
         is Row.ThreadRow -> threads
         is Row.ThreadLinkRow -> threadLinks
         is Row.PeriodRow -> periods

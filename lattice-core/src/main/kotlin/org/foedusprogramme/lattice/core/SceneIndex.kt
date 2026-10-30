@@ -4,14 +4,15 @@ import java.util.TreeSet
 
 /**
  * The SCENE EPISODES side-store of [LatticeGraph]: the RAM cache of the stored scenes, scene members, threads and
- * thread links, plus the indexes recall and the formatter read once per recalled hit.
+ * thread links, and of the scene pipeline's work state and cursors, plus the indexes recall and the formatter read
+ * once per recalled hit.
  * [LatticeGraph] owns one instance and delegates its public scene / thread methods to it; like the graph it is
  * not thread-safe and is touched only on the graph's owner thread.
  *
  * Indexes kept in step with every mutation (load, [putScene], [putThread], [linkThread], [redirect] on an
  * absorb, [removeEngram] on a node removal):
- *  - hub engram id -> scene ids, chat -> scene ids, scene -> members, member -> scenes;
- *  - chat -> thread ids (id order), thread -> links, engram id -> its thread links (the reverse index: which
+ *  - hub engram id -> scene ids, chat -> scenes in [SCENE_ORDER], scene -> members, member -> scenes;
+ *  - chat -> thread ids, thread -> links, engram id -> its thread links (the reverse index: which
  *    threads a memory sets up or resolves, without scanning every thread of every chat), and the number of
  *    CLOSED threads (the "no closed thread at all" fast path).
  *
@@ -39,7 +40,11 @@ internal class SceneIndex(
     private val scenesById = HashMap<Long, SceneRecord>()
     /** hub engram id -> the scenes pointing at it, most recently written last ([sceneOfHub] reads the last). */
     private val sceneIdsByHub = HashMap<Long, LinkedHashSet<Long>>()
-    private val sceneIdsByChat = HashMap<String, TreeSet<Long>>()
+    private val scenesByChat = HashMap<String, TreeSet<SceneRecord>>()
+    /** chat -> the highest [SceneRecord.seq] of its scenes. */
+    private val maxSeqByChat = HashMap<String, Long>()
+    private val workByScene = HashMap<Long, SceneWorkRecord>()
+    private val cursorsByConversation = LinkedHashMap<String, SceneCursorRecord>()
     private val membersByScene = HashMap<Long, MutableSet<Long>>()
     private val scenesByMember = HashMap<Long, MutableSet<Long>>()
 
@@ -55,6 +60,8 @@ internal class SceneIndex(
     fun load(loaded: LatticeStore.Loaded) {
         for (sc in loaded.scenes) cacheScene(sc)
         for ((sceneId, engramId) in loaded.sceneMembers) cacheSceneMember(sceneId, engramId)
+        for (w in loaded.sceneWork) workByScene[w.sceneId] = w
+        for (c in loaded.sceneCursors) cursorsByConversation[c.conversationId] = c
         for (t in loaded.threads) cacheThread(t)
         for (l in loaded.threadLinks) cacheLink(l)
     }
@@ -83,9 +90,39 @@ internal class SceneIndex(
 
     fun scenes(): List<SceneRecord> = scenesById.values.toList()
 
-    /** The scenes of one chat, in scene-id order. */
-    fun scenes(chatKey: String): List<SceneRecord> =
-        sceneIdsByChat[chatKey].orEmpty().mapNotNull { scenesById[it] }
+    /** The scenes of one chat, oldest first ([SCENE_ORDER]). */
+    fun scenes(chatKey: String): List<SceneRecord> = scenesByChat[chatKey]?.toList().orEmpty()
+
+    /** The next capture sequence number of [chatKey]: one past the highest [SceneRecord.seq] of its scenes. */
+    fun nextSceneSeq(chatKey: String): Long = (maxSeqByChat[chatKey] ?: 0) + 1
+
+    fun sceneWork(sceneId: Long): SceneWorkRecord? = workByScene[sceneId]
+
+    fun sceneCursor(conversationId: String): SceneCursorRecord? = cursorsByConversation[conversationId]
+
+    /** Every conversation cursor, in the order they were first written. */
+    fun sceneCursors(): List<SceneCursorRecord> = cursorsByConversation.values.toList()
+
+    /**
+     * Writes whichever of [scene], [work] and [cursor] is given as ONE store batch, then caches them. A [work] record
+     * needs its scene: [scene], or one already written.
+     */
+    fun putSceneState(scene: SceneRecord?, work: SceneWorkRecord?, cursor: SceneCursorRecord?) {
+        if (work != null) {
+            require(work.sceneId == scene?.sceneId || work.sceneId in scenesById) {
+                "Scene ${work.sceneId} doesn't exist; write the scene with its work state."
+            }
+        }
+        scene?.let { ids.observe(it.sceneId) }
+        store.batch { s ->
+            scene?.let(s::putScene)
+            work?.let(s::putSceneWork)
+            cursor?.let(s::putSceneCursor)
+        }
+        scene?.let(::cacheScene)
+        work?.let { workByScene[it.sceneId] = it }
+        cursor?.let { cursorsByConversation[it.conversationId] = it }
+    }
 
     fun sceneOfHub(hubEngramId: Long): SceneRecord? =
         sceneIdsByHub[hubEngramId]?.lastOrNull()?.let { scenesById[it] }
@@ -103,10 +140,14 @@ internal class SceneIndex(
         val id = scene.sceneId
         scenesById.put(id, scene)?.let { old ->
             old.hubEngramId?.let { hub -> removeFrom(sceneIdsByHub, hub, id) }
-            if (old.chatKey != scene.chatKey) removeFrom(sceneIdsByChat, old.chatKey, id)
+            scenesByChat[old.chatKey]?.let { chat ->
+                chat.remove(old)
+                if (chat.isEmpty()) scenesByChat.remove(old.chatKey)
+            }
         }
         scene.hubEngramId?.let { hub -> sceneIdsByHub.getOrPut(hub) { LinkedHashSet() }.add(id) }
-        sceneIdsByChat.getOrPut(scene.chatKey) { TreeSet() }.add(id)
+        scenesByChat.getOrPut(scene.chatKey) { TreeSet(SCENE_ORDER) }.add(scene)
+        if (scene.seq > (maxSeqByChat[scene.chatKey] ?: 0)) maxSeqByChat[scene.chatKey] = scene.seq
     }
 
     private fun cacheSceneMember(sceneId: Long, engramId: Long) {
@@ -144,12 +185,18 @@ internal class SceneIndex(
 
     fun thread(threadId: Long): ThreadRecord? = threadsById[threadId]
 
-    fun threads(chatKey: String?): List<ThreadRecord> =
-        if (chatKey == null) {
-            threadsById.values.sortedBy { it.id }
-        } else {
-            threadIdsByChat[chatKey].orEmpty().mapNotNull { threadsById[it] }
-        }
+    /**
+     * Thread rows, of one chat or all, oldest first: in the [SCENE_ORDER] of the scene that opened them (a thread with
+     * no known opening scene first), then by id.
+     */
+    fun threads(chatKey: String?): List<ThreadRecord> {
+        val rows = if (chatKey == null) threadsById.values else threadIdsByChat[chatKey].orEmpty().mapNotNull { threadsById[it] }
+        return rows.sortedWith(threadOrder)
+    }
+
+    private val threadOrder: Comparator<ThreadRecord> =
+        compareBy<ThreadRecord, SceneRecord?>(nullsFirst(SCENE_ORDER)) { t -> t.openedSceneId?.let(scenesById::get) }
+            .thenBy { it.id }
 
     fun threadLinks(threadId: Long): List<ThreadLinkRecord> = linksByThread[threadId]?.toList().orEmpty()
 

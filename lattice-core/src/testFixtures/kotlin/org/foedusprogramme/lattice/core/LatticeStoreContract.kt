@@ -82,11 +82,28 @@ abstract class LatticeStoreContract {
         store.linkEngramEntity(1, 10)
         store.linkEngramEntity(2, 10)
         store.markEntityResolved(1)
-        val scene = SceneRecord(20, "游泳课", "conv-1", CHAT, 100, 140, "2026-07-22", "2026-07-23", inProgress = true, hubEngramId = 2)
+        val scene = SceneRecord(
+            20, "游泳课", "conv-1", CHAT, 100, 140, "2026-07-22", "2026-07-23", inProgress = true, hubEngramId = 2,
+            startedAt = T1, seq = 7,
+        )
         val plainScene = SceneRecord(21, "Later", "conv-1", CHAT, 141, 150)
         store.putScene(scene)
         store.putScene(plainScene)
         store.putSceneMember(20, 1)
+        val work = SceneWorkRecord(
+            20, SceneWorkState.NARRATING, "学游泳的一节课", extractedThrough = 140, extractAttempts = 1, chunksDone = 3,
+            chunksFailed = 1, narrateAttempts = 2,
+        )
+        val plainWork = SceneWorkRecord(21, SceneWorkState.OPEN)
+        store.putSceneWork(work)
+        store.putSceneWork(plainWork)
+        val cursor = SceneCursorRecord(
+            "conv-1", CHAT, segmentedThrough = 150, segmentAttempts = 2, fallbackThrough = 180, extractAttempts = 1,
+            blockedSince = T2, finished = true,
+        )
+        val plainCursor = SceneCursorRecord("conv/2%", OTHER_CHAT)
+        store.putSceneCursor(cursor)
+        store.putSceneCursor(plainCursor)
         val thread = ThreadRecord(30, CHAT, "learn to swim", ThreadState.CLOSED, 20, 21, staleCount = 2, name = "swimming")
         val plainThread = ThreadRecord(31, CHAT, "find a pool")
         store.putThread(thread)
@@ -135,6 +152,8 @@ abstract class LatticeStoreContract {
         assertEquals(setOf(1L), loaded.resolvedEntityIds)
         assertEquals(setOf(scene, plainScene), loaded.scenes.toSet())
         assertEquals(listOf(20L to 1L), loaded.sceneMembers)
+        assertEquals(setOf(work, plainWork), loaded.sceneWork.toSet())
+        assertEquals(setOf(cursor, plainCursor), loaded.sceneCursors.toSet())
         assertEquals(setOf(thread, plainThread), loaded.threads.toSet())
         assertEquals(setOf(setup, resolve), loaded.threadLinks.toSet())
         assertEquals(listOf(era), loaded.eras)
@@ -323,6 +342,24 @@ abstract class LatticeStoreContract {
         val loaded = store.reopened().load()
         assertEquals(updated, loaded.scenes.single { it.sceneId == 20L })
         assertEquals(setOf(20L to 2L, 21L to 2L), loaded.sceneMembers.toSet())
+    }
+
+    @Test
+    fun `scene work upserts and needs its scene, cursors upsert by conversation`() {
+        val store = withEngrams(1)
+        store.putScene(SceneRecord(20, "a", "c", CHAT, 1, 2))
+        store.putSceneWork(SceneWorkRecord(20, SceneWorkState.OPEN))
+        val narrating = SceneWorkRecord(20, SceneWorkState.NARRATING, "s", extractedThrough = 2, chunksDone = 1)
+        store.putSceneWork(narrating)
+        assertFails { store.putSceneWork(SceneWorkRecord(99, SceneWorkState.OPEN)) }
+        store.putSceneCursor(SceneCursorRecord("c", CHAT, segmentedThrough = 2))
+        val finished = SceneCursorRecord("c", CHAT, segmentedThrough = 9, finished = true)
+        store.putSceneCursor(finished)
+        store.deleteEngram(1)
+
+        val loaded = store.reopened().load()
+        assertEquals(listOf(narrating), loaded.sceneWork)
+        assertEquals(listOf(finished), loaded.sceneCursors)
     }
 
     @Test
@@ -551,11 +588,15 @@ abstract class LatticeStoreContract {
             s.putEdge(EdgeRecord(1, 2, Edge.Type.SEMANTIC, 0.5, T0))
             s.putScene(SceneRecord(20, "a", "c", CHAT, 1, 2))
             s.putSceneMember(20, 1)
+            s.putSceneWork(SceneWorkRecord(20, SceneWorkState.EXTRACTING))
+            s.putSceneCursor(SceneCursorRecord("c", CHAT, segmentedThrough = 2))
         }
         val loaded = store.reopened().load()
         assertEquals(2, loaded.engrams.size)
         assertEquals(1, loaded.edges.size)
         assertEquals(1, loaded.sceneMembers.size)
+        assertEquals(1, loaded.sceneWork.size)
+        assertEquals(1, loaded.sceneCursors.size)
     }
 
     @Test
@@ -568,6 +609,9 @@ abstract class LatticeStoreContract {
                 s.putEdge(EdgeRecord(1, 2, Edge.Type.CAUSAL, 0.9, T1))
                 s.deleteEngram(1)
                 s.putPeriod(PeriodRecord(10, CHAT, "甲"))
+                s.putScene(SceneRecord(20, "a", "c", CHAT, 1, 2))
+                s.putSceneWork(SceneWorkRecord(20, SceneWorkState.OPEN))
+                s.putSceneCursor(SceneCursorRecord("c", CHAT, segmentedThrough = 2))
                 error("the block fails midway")
             }
         }
@@ -583,6 +627,7 @@ abstract class LatticeStoreContract {
         assertEquals(listOf(1L), loaded.engrams.map { it.id })
         assertEquals(listOf(EdgeRecord(1, 1, Edge.Type.SEMANTIC, 0.1, T0)), loaded.edges)
         assertTrue(loaded.periods.isEmpty())
+        assertTrue(loaded.scenes.isEmpty() && loaded.sceneWork.isEmpty() && loaded.sceneCursors.isEmpty())
         reopened.putPeriod(PeriodRecord(10, CHAT, "甲", state = PeriodState.PROVISIONAL))
     }
 
