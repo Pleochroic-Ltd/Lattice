@@ -63,7 +63,9 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
 import java.util.concurrent.FutureTask
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resumeWithException
@@ -128,8 +130,17 @@ internal class DefaultLattice(
 
     @Volatile
     private var graphThread: Thread? = null
-    private val graphExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "lattice-$name-graph").apply { isDaemon = true }.also { graphThread = it }
+
+    /** Set by [close]: the store is flushed and closed as the graph executor terminates, after its last task ran. */
+    @Volatile
+    private var closeStoreOnStop = false
+    private val graphExecutor: ExecutorService = object : ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue(),
+        { r -> Thread(r, "lattice-$name-graph").apply { isDaemon = true }.also { graphThread = it } },
+    ) {
+        override fun terminated() {
+            if (closeStoreOnStop) closeStore()
+        }
     }
     private val captureExecutor = singleThread("capture")
     private val narrationExecutor = singleThread("narrate")
@@ -813,8 +824,9 @@ internal class DefaultLattice(
      * its next step) and then for the scene work queued so far, then stops the threads and flushes and closes the store
      * as the graph thread's last task. Work still running at the deadline is interrupted on the capture and narration
      * threads (a scene model call cut off this way counts no attempt) and work still queued there is dropped, failing
-     * whoever waits on it with [IllegalStateException]; the graph thread is never interrupted. A second
-     * close waits for the first.
+     * whoever waits on it with [IllegalStateException]. The graph thread is never interrupted: it gets another
+     * [LatticeSettings.shutdownTimeout] of its own to run what is queued, and if it is still busy after that the store
+     * closes when its last task ends, never before. A second close waits for the first.
      */
     override suspend fun close(): Unit = withContext(NonCancellable) {
         val first = synchronized(lifecycle) {
@@ -847,28 +859,31 @@ internal class DefaultLattice(
         withContext(Dispatchers.IO) {
             stop(captureExecutor, remaining(), interrupt = true)
             stop(narrationExecutor, remaining(), interrupt = true)
-            try {
-                graphExecutor.execute {
-                    try {
-                        (store as? Flushable)?.flush()
-                    } catch (e: Exception) {
-                        logger.warn("Lattice {} close: flushing the store failed: {}", name, e.message, e)
-                    }
-                    try {
-                        store.close()
-                    } catch (e: Exception) {
-                        logger.warn("Lattice {} close: closing the store failed: {}", name, e.message, e)
-                    }
-                }
-            } catch (e: RejectedExecutionException) {
-                logger.warn("Lattice {} close: the graph thread was already stopped; the store stays open", name)
-            }
-            if (!stop(graphExecutor, remaining(), interrupt = false)) {
-                logger.error("Lattice {} close: the graph thread is still busy; the store closes when it finishes", name)
+            // The graph gets a wait of its own (its tasks are short); the store closes once its last task has run.
+            closeStoreOnStop = true
+            if (!stop(graphExecutor, settings.shutdownTimeout, interrupt = false)) {
+                logger.error(
+                    "Lattice {} close: the graph thread is still busy after {}; the store closes when it finishes",
+                    name, settings.shutdownTimeout,
+                )
             }
         }
         closedDone.complete(Unit)
         Unit
+    }
+
+    /** Flushes and closes the store; on the graph thread as it terminates, so no graph task can write after it. */
+    private fun closeStore() {
+        try {
+            (store as? Flushable)?.flush()
+        } catch (e: Exception) {
+            logger.warn("Lattice {} close: flushing the store failed: {}", name, e.message, e)
+        }
+        try {
+            store.close()
+        } catch (e: Exception) {
+            logger.warn("Lattice {} close: closing the store failed: {}", name, e.message, e)
+        }
     }
 
     /** Shuts [executor] down and waits up to [timeout]; true when it terminated. */

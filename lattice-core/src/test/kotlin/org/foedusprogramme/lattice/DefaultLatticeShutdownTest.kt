@@ -7,6 +7,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.foedusprogramme.lattice.core.Engram
 import org.foedusprogramme.lattice.core.FakeConversationSource
 import org.foedusprogramme.lattice.core.TopicModel
 import java.util.concurrent.CountDownLatch
@@ -86,6 +87,56 @@ class DefaultLatticeShutdownTest {
         long.await()
     }
 
+    @Test
+    fun aCloseThatTimedOutOnACallStillGivesTheGraphItsOwnWaitAndThenClosesTheStore() = runBlocking {
+        val store = WatchedStore()
+        val lattice = LatticeTestKit.open(settings = LatticeTestKit.settings(shutdownTimeout = 1.seconds), store = store)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        // One call in flight past the drain deadline, holding the graph thread.
+        val busy = async(Dispatchers.IO) {
+            runCatching { lattice.withGraph { g -> started.countDown(); holdUninterruptibly(release); g.remember(LATE) } }
+        }
+        assertTrue(started.await(5, TimeUnit.SECONDS))
+        val closing = async(Dispatchers.IO) { lattice.close(); store.closed }
+        delay(1_500) // past the drain deadline, inside the graph's own wait
+        release.countDown()
+
+        assertTrue(withTimeout(5.seconds) { closing.await() }, "close returned with the store closed")
+        assertTrue(store.engrams.values.any { it.content == LATE }, "the graph's last write landed before the close")
+        assertFalse(store.writeAfterClose, "nothing was written after the store closed")
+        assertTrue(busy.await().isSuccess)
+    }
+
+    @Test
+    fun aGraphTaskBusyPastItsWaitClosesTheStoreWhenItEndsNeverBefore() = runBlocking {
+        val store = WatchedStore()
+        val lattice = LatticeTestKit.open(settings = shortClose, store = store)
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val busy = async(Dispatchers.IO) { lattice.onGraph { g -> started.countDown(); holdUninterruptibly(release); g.remember(LATE) } }
+        assertTrue(started.await(5, TimeUnit.SECONDS))
+
+        withTimeout(5.seconds) { lattice.close() }
+        assertFalse(store.closed, "the graph task may still write: the store stays open")
+        release.countDown()
+        busy.await()
+        withTimeout(5.seconds) { while (!store.closed) delay(10) }
+        assertTrue(store.engrams.values.any { it.content == LATE })
+        assertFalse(store.writeAfterClose)
+    }
+
+    /** A store that notes a write after its close. */
+    private class WatchedStore : LatticeTestKit.FlushingStore() {
+        @Volatile
+        var writeAfterClose = false
+
+        override fun putEngram(engram: Engram) {
+            if (closed) writeAfterClose = true
+            super.putEngram(engram)
+        }
+    }
+
     /** The sleep ended (no hang), never as a cancellation; a report it returned names the phase the close cut off. */
     private fun assertSleepEndedByClose(outcome: Result<SleepReport>, phase: SleepPhase) {
         val failure = outcome.exceptionOrNull()
@@ -97,6 +148,8 @@ class DefaultLatticeShutdownTest {
     }
 
     private companion object {
+        const val LATE = "the user wrote this as the graph closed"
+
         /** Waits for [release] whatever interrupts arrive (a task that ignores the shutdown), then re-sets the flag. */
         fun holdUninterruptibly(release: CountDownLatch) {
             var interrupted = false

@@ -80,7 +80,7 @@ internal object LatticeTestKit {
     }
 
     /** A store that is [Flushable] and records flushes and the close. */
-    class FlushingStore : TestLatticeStore(), Flushable {
+    open class FlushingStore : TestLatticeStore(), Flushable {
         val flushes = AtomicInteger()
 
         @Volatile
