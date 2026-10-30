@@ -1,12 +1,20 @@
 package org.foedusprogramme.lattice.alexandrite
 
 import org.foedusprogramme.lattice.LatticeDependencies
+import org.foedusprogramme.lattice.core.BundledTexts
 import org.foedusprogramme.lattice.core.Embedder
 import org.foedusprogramme.lattice.core.FileMemoryDeadLetter
 import org.foedusprogramme.lattice.core.LatticeStore
 import org.foedusprogramme.lattice.core.MemoryModel
 import org.foedusprogramme.lattice.core.MemoryTask
 import org.foedusprogramme.lattice.core.MemoryTexts
+import org.foedusprogramme.lattice.remote.OpenAiChatMemoryModel
+import org.foedusprogramme.lattice.remote.OpenAiEmbedder
+import org.foedusprogramme.lattice.remote.PleochroicClient
+import org.foedusprogramme.lattice.remote.PleochroicEmbedder
+import org.foedusprogramme.lattice.remote.PleochroicGraphStore
+import org.foedusprogramme.lattice.remote.PleochroicMemoryModel
+import org.foedusprogramme.lattice.sqlite.SqliteLatticeStore
 import org.unitedsoftware.alexandrite.sdk.config.ConfigException
 import org.unitedsoftware.alexandrite.sdk.config.Secret
 import org.unitedsoftware.alexandrite.sdk.model.ModelEndpoint
@@ -126,7 +134,7 @@ internal class Backends(
 
     private fun model(model: ModelConfig): MemoryModel? = when (model.kind) {
         HOST -> hostModel
-        OPENAI -> openAiModel(model.baseUrl!!, model.apiKey, MemoryTask.entries.associateWith(model::modelOf))
+        OPENAI -> openAiModel(model.baseUrl!!, model.apiKey, model.default!!, MemoryTask.entries.associateWith(model::modelOf))
         PLEOCHROIC -> pleochroicModel()
         else -> null
     }
@@ -139,38 +147,29 @@ internal class Backends(
         }
     }
 
-    // The constructors below belong to lattice-sqlite, lattice-remote and lattice-core's texts, which other work
-    // packages write; the merge fills each in with the call in its comment.
+    private val pleochroicClient: PleochroicClient by lazy {
+        val account = config.pleochroic!!
+        PleochroicClient(account.apiKey!!.reveal(), account.baseUrl!!, clientName = "lattice-alexandrite")
+    }
 
-    // TODO(merge): SqliteLatticeStore(path)
-    private fun sqliteStore(path: Path): LatticeStore = TODO("SqliteLatticeStore($path) comes with lattice-sqlite")
+    private fun sqliteStore(path: Path): LatticeStore = SqliteLatticeStore(path)
 
-    // TODO(merge): PleochroicGraphStore(pleochroicClient, graphName, stateDir)
     private fun pleochroicStore(graphName: String, stateDir: Path): LatticeStore =
-        TODO("PleochroicGraphStore($graphName, $stateDir) comes with lattice-remote")
+        PleochroicGraphStore(pleochroicClient, graphName, stateDir)
 
-    // TODO(merge): OpenAiEmbedder(baseUrl, model, apiKey?.reveal(), dimension)
     private fun openAiEmbedder(baseUrl: String, model: String, apiKey: Secret?, dimension: Int): Embedder =
-        TODO("OpenAiEmbedder($baseUrl, $model, $dimension) comes with lattice-remote")
+        OpenAiEmbedder(OpenAiEmbedder.Config(baseUrl, model, apiKey?.reveal(), expectedDimension = dimension))
 
-    // TODO(merge): PleochroicEmbedder(pleochroicClient)
-    private fun pleochroicEmbedder(): Embedder = TODO("PleochroicEmbedder comes with lattice-remote")
+    private fun pleochroicEmbedder(): Embedder = PleochroicEmbedder(pleochroicClient)
 
-    // TODO(merge): OpenAiChatMemoryModel(baseUrl, apiKey?.reveal(), models), models by MemoryTask
-    private fun openAiModel(baseUrl: String, apiKey: Secret?, models: Map<MemoryTask, String>): MemoryModel =
-        TODO("OpenAiChatMemoryModel($baseUrl, $models) comes with lattice-remote")
+    private fun openAiModel(baseUrl: String, apiKey: Secret?, default: String, models: Map<MemoryTask, String>): MemoryModel =
+        OpenAiChatMemoryModel(
+            OpenAiChatMemoryModel.Config(baseUrl, default, models, apiKey?.reveal()),
+        )
 
-    // TODO(merge): PleochroicMemoryModel(pleochroicClient)
-    private fun pleochroicModel(): MemoryModel = TODO("PleochroicMemoryModel comes with lattice-remote")
+    private fun pleochroicModel(): MemoryModel = PleochroicMemoryModel(pleochroicClient)
 
-    // TODO(merge): BundledTexts()
-    private fun texts(): MemoryTexts = TODO("BundledTexts comes with lattice-core's texts")
-
-    // TODO(merge): one client for the store, embedder and model, built on first use:
-    //  private val pleochroicClient by lazy {
-    //      val account = config.pleochroic!!
-    //      PleochroicClient(account.baseUrl!!, account.apiKey!!.reveal())
-    //  }
+    private fun texts(): MemoryTexts = BundledTexts
 
     private companion object {
         const val GRAPHS = "graphs"
