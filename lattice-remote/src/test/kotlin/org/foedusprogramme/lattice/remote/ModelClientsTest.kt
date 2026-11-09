@@ -107,6 +107,20 @@ class OpenAiChatMemoryModelTest {
     }
 
     @Test
+    fun `by default extraction and abstraction reason hard and every call samples at the default temperature and top_p`() {
+        val m = OpenAiChatMemoryModel(OpenAiChatMemoryModel.Config(baseUrl = server.baseUrl, defaultModel = "small"))
+        for (task in listOf(MemoryTask.EXTRACT, MemoryTask.ABSTRACT, MemoryTask.JUDGE, MemoryTask.SCENES)) m.complete(task, "s", "u")
+        val (extract, abstract, judge, scenes) = server.bodies
+        for (body in listOf(extract, abstract)) assertEquals("\"high\"", body["reasoning_effort"].toString())
+        for (body in listOf(judge, scenes)) assertEquals(null, body["reasoning_effort"])
+        for (body in server.bodies) {
+            assertEquals("0.2", body["temperature"].toString())
+            assertEquals("1.0", body["top_p"].toString())
+            assertEquals(null, body["max_tokens"])
+        }
+    }
+
+    @Test
     fun `an empty answer is returned as is`() {
         server.chatContent = ""
         assertEquals("", model().complete(MemoryTask.NARRATE, "s", "u"))

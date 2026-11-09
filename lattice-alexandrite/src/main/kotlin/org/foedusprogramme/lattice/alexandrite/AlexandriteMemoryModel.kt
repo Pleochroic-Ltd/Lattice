@@ -77,7 +77,7 @@ internal class AlexandriteMemoryModel(
         val info = info(endpoint, model)
         val options = ModelOptions.builder()
             .maxOutputTokens(minOf(maxOutputTokens, info?.maxOutputTokens ?: maxOutputTokens))
-            .reasoning(info?.let { EFFORTS.firstOrNull { effort -> effort in it.reasoningEfforts } })
+            .reasoning(info?.let { (if (task in DEEP_TASKS) DEEP_EFFORTS else EFFORTS).firstOrNull { effort -> effort in it.reasoningEfforts } })
             .build()
         val history = listOf(UserEntry(null, listOf(TextPart(user)), UserOrigin.SystemWritten(SOURCE)))
         val ids = RequestIds(CONVERSATION, TurnId("$SOURCE-${task.wire}-${calls.incrementAndGet()}"), 0)
@@ -112,6 +112,12 @@ internal class AlexandriteMemoryModel(
 
         /** The efforts a request asks for, least first. */
         val EFFORTS = listOf(ReasoningEffort.NONE, ReasoningEffort.MINIMAL, ReasoningEffort.LOW)
+
+        /** Extraction and abstraction reason hard. */
+        val DEEP_TASKS = setOf(MemoryTask.EXTRACT, MemoryTask.ABSTRACT)
+
+        /** The efforts a deep task asks for, preferred first. */
+        val DEEP_EFFORTS = listOf(ReasoningEffort.HIGH, ReasoningEffort.XHIGH, ReasoningEffort.MAX, ReasoningEffort.MEDIUM)
 
         val UNAVAILABLE = setOf(
             ModelErrorKind.CONNECTION,

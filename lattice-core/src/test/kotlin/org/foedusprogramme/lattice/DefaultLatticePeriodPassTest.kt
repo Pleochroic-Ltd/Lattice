@@ -86,7 +86,11 @@ class DefaultLatticePeriodPassTest {
     @Test
     fun `without scenes the PERIODS phase is skipped and the pass never runs`() = runBlocking {
         val ran = AtomicBoolean()
-        val lattice = LatticeTestKit.open(model = MemoryModel { _, _, _ -> error("no model call") }, formPeriods = SleepPass { ran.set(true); 0 })
+        val lattice = LatticeTestKit.open(
+            settings = LatticeTestKit.settings().copy(scenes = SceneSettings(enabled = false)),
+            model = MemoryModel { _, _, _ -> error("no model call") },
+            formPeriods = SleepPass { ran.set(true); 0 },
+        )
 
         val report = lattice.sleep(setOf(SleepPhase.PERIODS)).phases.single()
 

@@ -211,7 +211,7 @@ class DefaultLatticePeriodsTest {
 
     @Test
     fun `without scenes there is no period layer`() = runBlocking {
-        for (lattice in listOf(open(scenes = SceneSettings()), open(conversations = null))) {
+        for (lattice in listOf(open(scenes = SceneSettings(enabled = false)), open(conversations = null))) {
             assertNull(lattice.periods)
             assertNull(lattice.catalogue(CHAT))
             assertNull(lattice.timeline(CHAT))

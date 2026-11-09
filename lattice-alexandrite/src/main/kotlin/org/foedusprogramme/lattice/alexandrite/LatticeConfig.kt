@@ -84,7 +84,7 @@ internal class LatticeConfig(
         sleep.check()
         graph.check()
         scenes.check()
-        require(!scenes.enabled || model.kind != NONE) {
+        require(scenes.enabled != true || model.kind != NONE) {
             "scenes.enabled needs a model to cut conversations into scenes: set model.kind to \"host\", \"openai\" " +
                 "or \"pleochroic\", or set scenes.enabled to false."
         }
@@ -93,6 +93,9 @@ internal class LatticeConfig(
     val embedderConfig: EmbedderConfig get() = embedder!!
 
     val modelConfig: ModelConfig get() = model!!
+
+    /** Whether conversations are cut into scenes: as [ScenesConfig.enabled] says, else whenever a model is set. */
+    val scenesOn: Boolean get() = scenes.enabled ?: (model?.kind != NONE)
 
     /** The zone of dates in memories, [host]'s when the config names none. */
     fun zone(host: ZoneId): ZoneId = zone?.let(ZoneId::of) ?: host
@@ -103,6 +106,7 @@ internal class LatticeConfig(
         zone = zone(hostZone),
         language = Language(recall.language),
         retrievalLimit = recall.limit,
+        searchLimit = recall.searchLimit,
         graphReadTimeout = graph.readTimeoutSeconds.seconds,
         shutdownTimeout = graph.shutdownTimeoutSeconds.seconds,
         judgeBudget = graph.judgeBudget,
@@ -119,7 +123,7 @@ internal class LatticeConfig(
         entityExtraction = graph.entityExtraction,
         entityRecall = graph.entityRecall,
         entityCoEncodeGate = graph.entityCoEncodeGate,
-        scenes = scenes.settings(),
+        scenes = scenes.settings(scenesOn),
     )
 }
 
@@ -315,7 +319,9 @@ internal class PleochroicConfig(val baseUrl: String? = null, val apiKey: Secret?
 @Serializable
 internal class RecallConfig(
     val enabled: Boolean = true,
-    val limit: Int = 6,
+    val limit: Int = 8,
+    /** How many memories `lattice.search` brings back when the call names no limit. */
+    val searchLimit: Int = 16,
     /** The language of the recall block's markers. */
     val language: String = "en",
     /** How long a turn waits for its recall. */
@@ -327,6 +333,9 @@ internal class RecallConfig(
 ) {
     fun check() {
         require(limit in 1..MAX_RECALL) { "recall.limit must be between 1 and $MAX_RECALL." }
+        require(searchLimit in 1..SearchTool.MAX_LIMIT) {
+            "recall.searchLimit must be between 1 and ${SearchTool.MAX_LIMIT}, the most a search may ask for."
+        }
         try {
             require(LanguageTag.of(language).value == language)
         } catch (e: IllegalArgumentException) {
@@ -415,10 +424,13 @@ internal class GraphConfig(
 
 @Serializable
 internal class ScenesConfig(
-    /** Cut conversations into scenes and capture them scene by scene, instead of in batches of turns. */
-    val enabled: Boolean = false,
+    /**
+     * Cut conversations into scenes and capture them scene by scene, instead of in batches of turns. Null = whenever a
+     * model is set.
+     */
+    val enabled: Boolean? = null,
     /** Show when each recalled memory was said, and recall scene summaries beside facts. */
-    val sceneEpisodes: Boolean = false,
+    val sceneEpisodes: Boolean = true,
     /** `anchors` or `selfCheck`: how a scene summary is checked against the scene. */
     val narrationCheck: String = ANCHORS,
     /** How many said messages of a live conversation gather before they are cut into scenes. */
@@ -460,8 +472,9 @@ internal class ScenesConfig(
         }
     }
 
-    fun settings(): SceneSettings = SceneSettings(
-        enabled = enabled,
+    /** The engine's scene settings, with scenes [on] or off as [LatticeConfig.scenesOn] decided. */
+    fun settings(on: Boolean): SceneSettings = SceneSettings(
+        enabled = on,
         sceneEpisodes = sceneEpisodes,
         narrationCheck = narrationCheck,
         segmentWindowMessages = segmentWindowMessages,

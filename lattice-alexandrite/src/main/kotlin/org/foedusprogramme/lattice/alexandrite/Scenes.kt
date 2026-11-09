@@ -56,11 +56,12 @@ internal class SceneHost(
     private val access: MemoryAccess,
 ) : Lifecycle {
     private val scenes = config.scenes
+    private val scenesOn = config.scenesOn
     val registry = ConversationRegistry(files.dataDir.resolve(SCENES_DIR).resolve("conversations.jsonl"))
     val toolRisks = ToolRisks(files.dataDir.resolve(SCENES_DIR).resolve("tool-risks.json"))
 
     /** Whether conversations are captured scene by scene. */
-    val live: Boolean = scenes.enabled && transcripts != null && conversations != null
+    val live: Boolean = scenesOn && transcripts != null && conversations != null
 
     override suspend fun onStart() {
         storesWarning()?.let { logger.warn(it) }
@@ -78,7 +79,7 @@ internal class SceneHost(
         if (missing.isEmpty()) return null
         val effects = listOfNotNull(
             "every captured turn and summary counts as tainted".takeIf { conversations == null },
-            "conversations are captured in batches of turns instead of scenes".takeIf { scenes.enabled },
+            "conversations are captured in batches of turns instead of scenes".takeIf { scenesOn },
         ).ifEmpty { listOf("scenes cannot be turned on") }
         return "The host binds no ${missing.joinToString(" and ")} to plugins, so ${effects.joinToString(" and ")}"
     }

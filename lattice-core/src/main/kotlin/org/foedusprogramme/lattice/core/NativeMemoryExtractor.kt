@@ -50,6 +50,7 @@ class NativeMemoryExtractor(
 ) {
     private val systemPrompt = buildPrompt(userName, temporalLayer, selfAliases)
     private val whoIsWho = whoIsWhoLine(userName, selfAliases)
+    private val assistantSpeakers = selfAliases.mapTo(HashSet()) { it.trim().lowercase() }
 
     /**
      * Extracts memories from [transcript]. With the temporal layer on AND a trusted [referenceTime] (a real message
@@ -84,7 +85,7 @@ class NativeMemoryExtractor(
         // transient backend outage, so a caller can count only poison toward a dead-letter cap. The RAW output rides
         // on the exception so the caller can dead-letter it: a refusal, a preamble or a JSON body truncated at the
         // output-token ceiling is only diagnosable if what the model said is kept.
-        return parse(raw)
+        return parse(raw, assistantSpeakers)
             ?: throw UnparseableExtractionException("memory extraction: model output was not parseable JSON", raw)
     }
 
@@ -362,8 +363,9 @@ class NativeMemoryExtractor(
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
 
         /** Returns null when the output has no parseable JSON object (a failure); an [Extraction]
-         *  (possibly empty) when it parsed. Callers treat null as "retry", empty as "kept nothing". */
-        fun parse(raw: String): Extraction? {
+         *  (possibly empty) when it parsed. Callers treat null as "retry", empty as "kept nothing".
+         *  A quote whose speaker is one of [assistantSpeakers] (lowercase) is the assistant's. */
+        fun parse(raw: String, assistantSpeakers: Set<String> = emptySet()): Extraction? {
             val root = parseLenientObject(raw) ?: return null
 
             val memories = root["memories"]?.jsonArray.orEmptyArray().mapNotNull { node ->
@@ -394,8 +396,9 @@ class NativeMemoryExtractor(
                         val text = q["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                         // Drop fragment "quotes" (a bare term/label, not a memorable line, e.g. "技术债").
                         if (text.length < MIN_QUOTE_CHARS) return@mapNotNull null
-                        val speaker = when (q["speaker"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()) {
+                        val speaker = when (val said = q["speaker"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()) {
                             "assistant", "model" -> Speaker.ASSISTANT
+                            in assistantSpeakers -> Speaker.ASSISTANT
                             else -> Speaker.USER
                         }
                         ExtractedQuote(speaker, text)

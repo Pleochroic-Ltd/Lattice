@@ -38,16 +38,27 @@ class OpenAiChatMemoryModel(
         val models: Map<MemoryTask, String> = emptyMap(),
         val apiKey: String? = null,
         /** Null leaves the server's default. */
-        val temperature: Double? = null,
+        val temperature: Double? = 0.2,
         /** Null sends no limit: a reasoning model can spend a small budget before it writes the answer. */
         val maxTokens: Int? = null,
         /** Fields merged into every request body, e.g. `reasoning_effort` or `top_p`. */
-        val extraBody: Map<String, JsonElement> = emptyMap(),
+        val extraBody: Map<String, JsonElement> = mapOf("top_p" to JsonPrimitive(1.0)),
+        /**
+         * Fields merged into one task's request bodies after [extraBody]. By default extraction and abstraction reason
+         * at `high`; clear it for a server that rejects `reasoning_effort`.
+         */
+        val taskBody: Map<MemoryTask, Map<String, JsonElement>> = DEEP_TASKS,
         val connectTimeout: Duration = Duration.ofSeconds(10),
         /** Extraction over a long window can take minutes on a local model. */
         val requestTimeout: Duration = Duration.ofMinutes(5),
     ) {
         fun modelFor(task: MemoryTask): String = models[task] ?: defaultModel
+
+        companion object {
+            /** `reasoning_effort: high` for [MemoryTask.EXTRACT] and [MemoryTask.ABSTRACT]. */
+            val DEEP_TASKS: Map<MemoryTask, Map<String, JsonElement>> =
+                listOf(MemoryTask.EXTRACT, MemoryTask.ABSTRACT).associateWith { mapOf("reasoning_effort" to JsonPrimitive("high")) }
+        }
 
         override fun toString(): String =
             "Config(baseUrl=$baseUrl, defaultModel=$defaultModel, models=$models, apiKey=${if (apiKey == null) "none" else "***"})"
@@ -102,6 +113,7 @@ class OpenAiChatMemoryModel(
         config.maxTokens?.let { put("max_tokens", it) }
         put("stream", false)
         config.extraBody.forEach { (name, value) -> put(name, value) }
+        config.taskBody[task]?.forEach { (name, value) -> put(name, value) }
     }
 
     override fun close() {

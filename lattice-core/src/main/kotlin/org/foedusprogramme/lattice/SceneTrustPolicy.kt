@@ -6,10 +6,14 @@ package org.foedusprogramme.lattice
  * policy does not trust, or is the result of a tool it does not trust or that replayed stored conversation text; or
  * when it advances or closes a thread an untrusted scene opened. Periods and their catalogue name trusted scenes only.
  *
- * The default, [Conservative], trusts nothing it is not told about: until a host names its owners and its local,
+ * The default, [Off], judges no sender, tool or host text: only a message the host marked tainted makes a scene
+ * untrusted. [Conservative] trusts nothing it is not told about: until a host names its owners and its local,
  * read-only tools, every scene with a person's message or a tool result in it is untrusted.
  */
 interface SceneTrustPolicy {
+    /** False: the policy is off, and a scene is untrusted only through a [ConversationMessage.tainted] message. */
+    val enforced: Boolean get() = true
+
     /** [senderId] ([ConversationMessage.senderId] of a person's message) is someone the graph's owner trusts in [chatKey]. */
     fun isTrustedSender(chatKey: String, senderId: String): Boolean
 
@@ -26,6 +30,21 @@ interface SceneTrustPolicy {
     fun isTrustedHostText(source: String?): Boolean
 
     companion object {
+        /** Judges nothing: every sender, tool and host text is trusted, and only tainted messages count. */
+        val Off: SceneTrustPolicy = object : SceneTrustPolicy {
+            override val enforced: Boolean get() = false
+
+            override fun isTrustedSender(chatKey: String, senderId: String): Boolean = true
+
+            override fun isTrustedTool(toolName: String, arguments: String?): Boolean = true
+
+            override fun opensRawText(toolName: String, arguments: String?): Boolean = false
+
+            override fun isTrustedHostText(source: String?): Boolean = true
+
+            override fun toString(): String = "SceneTrustPolicy.Off"
+        }
+
         /** Trusts no sender, no tool and no host text. */
         val Conservative: SceneTrustPolicy = NamedSceneTrustPolicy()
     }

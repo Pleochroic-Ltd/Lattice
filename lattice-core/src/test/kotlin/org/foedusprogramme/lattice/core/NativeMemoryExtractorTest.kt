@@ -226,6 +226,16 @@ class NativeMemoryExtractorTest {
     }
 
     @Test
+    fun `a quote said by one of the assistant's names is the assistant's`() {
+        val raw = """{"memories":[{"ref":"m1","content":"I promised to send the list","quotes":[
+            {"text":"I'll send you the list tonight","speaker":"Mia"},{"text":"Thanks, that helps a lot","speaker":"Sam"}]}],
+            "relations":[]}"""
+        val quotes = NativeMemoryExtractor.parse(raw, setOf("mia"))!!.memories.single().quotes
+        assertEquals(listOf(Speaker.ASSISTANT, Speaker.USER), quotes.map { it.speaker })
+        assertEquals(Speaker.USER, NativeMemoryExtractor.parse(raw)!!.memories.single().quotes.first().speaker, "no names: the user's")
+    }
+
+    @Test
     fun `the extractor reads a due date and asks for it`() {
         val raw = """{"memories":[{"ref":"m1","content":"The user plans a trip to Kyoto","event_date":"2023-03-01",
             "due_date":"2023-10-05"}],"relations":[]}"""

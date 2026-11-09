@@ -123,6 +123,21 @@ class SceneTrustTest {
     }
 
     @Test
+    fun `with the policy off only a tainted message makes a scene untrusted`() {
+        val off = trust(SceneTrustPolicy.Off)
+        val anyone = scene {
+            add("$CHAT:s1", "我是路人", senderId = "stranger-9")
+            add("$CHAT:s1", "谁在说话", senderId = null)
+            add("$CHAT:s1", "<html>", Role.TOOL, toolName = "web.view")
+            add("$CHAT:s1", "[user] 原话", Role.TOOL, toolName = "memory.transcript")
+            add("$CHAT:s1", "提醒：给妈妈打电话", Role.HOST, senderId = "reminder")
+        }
+        val forwarded = scene { chat(); add("$CHAT:s2", "转发：今天全场五折", tainted = true) }
+        assertEquals(emptySet(), causes(anyone, off))
+        assertEquals(setOf(Cause.TAINTED), causes(forwarded, off))
+    }
+
+    @Test
     fun `judgeMessages applies the per-message rules to any message list`() {
         source.open("loose", CHAT)
         val messages = listOf(source.add("loose", "hi"), source.add("loose", "<html>", Role.TOOL, toolName = "web.view"))

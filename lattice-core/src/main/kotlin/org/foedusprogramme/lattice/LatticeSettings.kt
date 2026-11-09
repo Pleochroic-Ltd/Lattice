@@ -28,7 +28,10 @@ data class LatticeSettings(
     val zone: ZoneId = ZoneId.systemDefault(),
     /** The language of recall markers when a call names none. */
     val language: Language = Language.EN,
-    val retrievalLimit: Int = 6,
+    /** Most memories the automatic per-turn recall brings back. */
+    val retrievalLimit: Int = 8,
+    /** Most memories an explicit search brings back when the call names no limit. */
+    val searchLimit: Int = 16,
     val graphReadTimeout: Duration = 15.seconds,
     val shutdownTimeout: Duration = 30.seconds,
     /** Most model-judged pairs a sleep reviews. */
@@ -49,11 +52,11 @@ data class LatticeSettings(
     val scenes: SceneSettings = SceneSettings(),
 )
 
-/** Scene capture, threads and periods; off until a host provides a conversation source. */
+/** Scene capture, threads and periods; they run once a host provides a conversation source and a model. */
 data class SceneSettings(
-    val enabled: Boolean = false,
+    val enabled: Boolean = true,
     /** Recall scene episodes alongside facts. */
-    val sceneEpisodes: Boolean = false,
+    val sceneEpisodes: Boolean = true,
     /** "anchors" or "selfCheck". */
     val narrationCheck: String = "anchors",
     val segmentWindowMessages: Int = 200,
@@ -84,5 +87,5 @@ data class LatticeDependencies(
     /** The host's conversations, read back for scenes; null = no scenes, whatever [SceneSettings.enabled] says. */
     val conversations: ConversationSource? = null,
     /** Whose words and which tools' results a scene's content may be trusted with (periods name trusted scenes only). */
-    val sceneTrust: SceneTrustPolicy = SceneTrustPolicy.Conservative,
+    val sceneTrust: SceneTrustPolicy = SceneTrustPolicy.Off,
 )

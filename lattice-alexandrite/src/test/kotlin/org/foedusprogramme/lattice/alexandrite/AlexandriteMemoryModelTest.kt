@@ -46,9 +46,13 @@ class AlexandriteMemoryModelTest {
         val user = request.history.single() as UserEntry
         assertEquals("Alice: I like tea", (user.parts.single() as TextPart).text)
         assertEquals(4000, request.options.maxOutputTokens)
-        assertEquals(ReasoningEffort.NONE, request.options.reasoning)
+        assertEquals(ReasoningEffort.HIGH, request.options.reasoning, "extraction reasons hard")
         assertEquals(0, request.ids.round)
         assertEquals(emptyList(), request.tools)
+
+        endpoint.reply { text("A quiet morning.") }
+        model().complete(MemoryTask.NARRATE, "Narrate the scene.", "Alice: good morning")
+        assertEquals(ReasoningEffort.NONE, endpoint.requests.last().options.reasoning, "the rest ask for the least")
     }
 
     @Test

@@ -45,8 +45,8 @@ class DefaultLatticeSleepTest {
             assertFalse(report.of(phase).skipped, "$phase needs no model")
             assertNull(report.of(phase).error)
         }
-        assertEquals("Scenes are off.", report.of(SleepPhase.CATCH_UP).skipReason)
-        assertEquals("Scenes are off.", report.of(SleepPhase.PERIODS).skipReason)
+        assertEquals("The host provides no conversations to read scenes from.", report.of(SleepPhase.CATCH_UP).skipReason)
+        assertEquals("The host provides no conversations to read scenes from.", report.of(SleepPhase.PERIODS).skipReason)
         assertEquals(6, report.engramsBefore)
         assertEquals(6, report.engramsAfter)
         lattice.close()

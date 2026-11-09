@@ -66,12 +66,14 @@ class LatticeConfigTest {
     }
 
     @Test
-    fun `the defaults keep a local graph, recall six memories and sleep at half past three`() {
+    fun `the defaults keep a local graph, recall eight memories and sleep at half past three`() {
         val config = decode(BASE_CONFIG)
 
         assertEquals(LOCAL, config.storage.kind)
         assertEquals("main", config.storage.graphName("main"))
-        assertEquals(6, config.recall.limit)
+        assertEquals(8, config.recall.limit)
+        assertEquals(16, config.recall.searchLimit)
+        assertEquals(16, config.settings(ZoneOffset.UTC).searchLimit)
         assertEquals(DROP, config.recall.fallback)
         assertTrue(config.recall.catalogue)
         assertEquals(4, config.capture.turnsPerBatch)
@@ -81,10 +83,15 @@ class LatticeConfigTest {
     }
 
     @Test
-    fun `scenes decode into the scene settings and are off by default`() {
+    fun `scenes decode into the scene settings, and run by default whenever a model is set`() {
         val off = decode(BASE_CONFIG).settings(ZoneOffset.UTC).scenes
-        assertFalse(off.enabled)
-        assertFalse(off.sceneEpisodes)
+        assertFalse(off.enabled, "no model, no scenes")
+        val byDefault = decode(config("""{"model": {"kind": "openai", "baseUrl": "http://x", "default": "m"}}"""))
+        assertTrue(byDefault.scenesOn)
+        assertTrue(byDefault.settings(ZoneOffset.UTC).scenes.enabled)
+        assertTrue(byDefault.settings(ZoneOffset.UTC).scenes.sceneEpisodes)
+        val turnedOff = decode(config("""{"model": {"kind": "openai", "baseUrl": "http://x", "default": "m"}, "scenes": {"enabled": false}}"""))
+        assertFalse(turnedOff.settings(ZoneOffset.UTC).scenes.enabled)
 
         val config = decode(
             config(
@@ -269,6 +276,7 @@ class LatticeConfigTest {
     @Test
     fun `recall, capture, sleep and zone values are checked`() {
         assertContains(refused(config("""{"recall": {"limit": 0}}""")), "recall.limit must be between 1 and 50")
+        assertContains(refused(config("""{"recall": {"searchLimit": 21}}""")), "recall.searchLimit must be between 1 and 20")
         assertContains(refused(config("""{"recall": {"language": "EN_us"}}""")), "recall.language must be a BCP 47 tag")
         assertContains(refused(config("""{"recall": {"timeoutMillis": 20000}}""")), "well under a hook's 10 seconds")
         assertContains(refused(config("""{"recall": {"fallback": "keep"}}""")), "recall.fallback must be")

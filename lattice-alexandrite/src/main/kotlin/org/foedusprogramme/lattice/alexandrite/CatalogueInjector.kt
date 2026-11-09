@@ -29,7 +29,7 @@ internal class CatalogueInjector(
     private val graphs: LatticeGraphs,
     private val access: MemoryAccess,
 ) : InterceptorHook<PromptSections> {
-    private val enabled = config.scenes.enabled && config.recall.catalogue
+    private val enabled = config.scenesOn && config.recall.catalogue
     private val language = Language(config.recall.language)
     private val readTimeout = config.recall.timeout
 

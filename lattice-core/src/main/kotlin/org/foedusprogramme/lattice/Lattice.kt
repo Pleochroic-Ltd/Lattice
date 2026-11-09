@@ -87,7 +87,7 @@ interface Lattice {
 class GraphBusyException(message: String) : RuntimeException(message)
 
 data class RecallOptions(
-    /** Most memories to bring back; null = [LatticeSettings.retrievalLimit]. */
+    /** Most memories to bring back; null = [LatticeSettings.searchLimit] for an explicit search, else [LatticeSettings.retrievalLimit]. */
     val limit: Int? = null,
     val reinforce: Reinforce = Reinforce.SOFT,
     /**

@@ -165,7 +165,7 @@ class DefaultLatticeScenesTest {
         val perTurn = lattice.recall("kyoto", RecallOptions(chatKey = CHAT)).text
         assertTrue(perTurn.isEmpty() || "2026-07-30 · " in perTurn, "a per-turn block also says how long ago: $perTurn")
 
-        val legacy = open()
+        val legacy = open(scenes = sceneSettings.copy(sceneEpisodes = false))
         legacy.withGraph { g -> g.remember("The user talked about kyoto", saidFrom = Instant.parse("2026-07-30T09:00:00Z")); Unit }
         assertFalse("said" in legacy.recall("kyoto", RecallOptions(explicit = true)).text, "no said tags without scene episodes")
     }
@@ -222,7 +222,7 @@ class DefaultLatticeScenesTest {
             "The host provides no conversations to read scenes from.",
             open(conversations = null).sleep(setOf(SleepPhase.CATCH_UP)).phases.single().skipReason,
         )
-        assertEquals("Scenes are off.", open(scenes = SceneSettings()).sleep(setOf(SleepPhase.CATCH_UP)).phases.single().skipReason)
+        assertEquals("Scenes are off.", open(scenes = SceneSettings(enabled = false)).sleep(setOf(SleepPhase.CATCH_UP)).phases.single().skipReason)
     }
 
     @Test

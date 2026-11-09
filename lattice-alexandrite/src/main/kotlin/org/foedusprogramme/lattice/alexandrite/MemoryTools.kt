@@ -27,7 +27,7 @@ import org.unitedsoftware.alexandrite.sdk.tool.ToolRisk
 @Contribute(Tool::class)
 internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGraphs, private val access: MemoryAccess) : Tool {
     private val language = Language(config.recall.language)
-    private val defaultLimit = config.recall.limit
+    private val defaultLimit = config.recall.searchLimit
 
     override val definition: ToolDefinition = ToolDefinition(
         name = "lattice.search",
@@ -81,7 +81,7 @@ internal class SearchTool(config: LatticeConfig, private val graphs: LatticeGrap
         return ToolResult(recall.text.ifBlank { "Nothing in memory matches the query." })
     }
 
-    private companion object {
+    companion object {
         const val MAX_LIMIT = 20
     }
 }

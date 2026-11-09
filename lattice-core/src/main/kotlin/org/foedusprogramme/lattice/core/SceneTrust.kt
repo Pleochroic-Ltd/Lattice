@@ -157,6 +157,7 @@ class SceneTrust(
 
     private fun judge(chatKey: String, m: ConversationMessage): Cause? {
         if (m.tainted) return Cause.TAINTED
+        if (!policy.enforced) return null
         return when (m.role) {
             ConversationMessage.Role.ASSISTANT -> null
             ConversationMessage.Role.USER -> {

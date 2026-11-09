@@ -341,7 +341,7 @@ internal class DefaultLattice(
             else -> RecallDating.turnEnd(options.chatKey, now(), zone)
         }
         onGraphBounded { g ->
-            val hits = dispatchTemporal(g, cue, options.limit ?: settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
+            val hits = dispatchTemporal(g, cue, options.limit ?: if (explicit) settings.searchLimit else settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
             val text = RecallFormatter.format(hits, markers, g.temporalLayerEnabled, lookup(g, language), settings.userName, dating)
             // Beyond the hits and their quotes the block shows thread names, written by a scene's narration; a scene
             // title rides only its own hub and a period name only a trusted scene.

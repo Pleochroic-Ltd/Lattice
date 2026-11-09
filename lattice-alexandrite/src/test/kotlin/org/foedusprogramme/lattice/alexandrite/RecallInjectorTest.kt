@@ -55,7 +55,7 @@ class RecallInjectorTest {
         val (cue, options) = main.cues.single()
         assertEquals("what do I drink?", cue)
         assertEquals(
-            listOf(6, Language.EN, "test:main:chat", false),
+            listOf(8, Language.EN, "test:main:chat", false),
             listOf(options.limit, options.language, options.chatKey, options.explicit),
         )
     }
