@@ -21,7 +21,9 @@ import org.foedusprogramme.lattice.core.Engram
 import org.foedusprogramme.lattice.core.Extraction
 import org.foedusprogramme.lattice.core.EntityAliasResolver
 import org.foedusprogramme.lattice.core.EntityResolver
+import org.foedusprogramme.lattice.core.Embedder
 import org.foedusprogramme.lattice.core.EpisodeNarrator
+import org.foedusprogramme.lattice.core.ExtractedChunk
 import org.foedusprogramme.lattice.core.FocusStack
 import org.foedusprogramme.lattice.core.GraphAccess
 import org.foedusprogramme.lattice.core.Language
@@ -89,7 +91,9 @@ internal fun interface SleepPass {
  * Threads. [LatticeGraph] is not thread-safe, so every graph access runs on one graph thread. Model calls never run
  * there: extraction runs on the capture thread, and the sleep's model calls (abstraction, narration, entities) on the
  * narration thread; merge-judge votes run on a temporary pool of [LatticeSettings.judgeParallelism] threads
- * ([LatticeGraph.vote] is the one graph method safe off the graph thread). Each call is a suspending hop onto those
+ * ([LatticeGraph.vote] is the one graph method safe off the graph thread). With [LatticeSettings.extractParallelism]
+ * above 1 the scene pipeline's extraction calls run ahead on a pool of that many threads, each also embedding the
+ * memories it extracted, and the capture thread writes their results in chunk order ([ScenePipeline]'s ordered apply). Each call is a suspending hop onto those
  * threads. Cancelling a caller never cuts a graph task short: a task that has started runs to completion and only its
  * result is dropped, a task that hasn't started never runs. Live calls (recall, remember, saveEpisode, stats,
  * withGraph) wait for the graph thread at most [LatticeSettings.graphReadTimeout], then throw [GraphBusyException];
@@ -124,6 +128,9 @@ internal class DefaultLattice(
     private val logger = LoggerFactory.getLogger(DefaultLattice::class.java)
     private val store = dependencies.store
     private val embedder = dependencies.embedder
+
+    /** The graph's embedder: the host's, answering from a chunk's vectors embedded ahead while that chunk is ingested. */
+    private val graphEmbedder = AheadEmbedder(embedder)
     private val texts: MemoryTexts = dependencies.texts
     private val zone = settings.zone
     private val now: () -> Instant = { dependencies.clock.instant() }
@@ -145,6 +152,14 @@ internal class DefaultLattice(
     }
     private val captureExecutor = singleThread("capture")
     private val narrationExecutor = singleThread("narrate")
+
+    /** The scene chunks' extraction calls made ahead of their turn; null at an [LatticeSettings.extractParallelism] of 1. */
+    private val extractExecutor: ExecutorService? = settings.extractParallelism.takeIf { it > 1 }?.let { n ->
+        ThreadPoolExecutor(
+            n, n, 30L, TimeUnit.SECONDS, LinkedBlockingQueue(),
+            { r -> Thread(r, "lattice-$name-extract").apply { isDaemon = true } },
+        ).apply { allowCoreThreadTimeOut(true) }
+    }
 
     /** Set when a model call reports the backend shutting down or the call interrupted; reset at each sleep. */
     private val modelStopped = AtomicBoolean(false)
@@ -190,7 +205,7 @@ internal class DefaultLattice(
             graphExecutor.submit(
                 Callable {
                     checkEmbedding()
-                    LatticeGraph(embedder, config, now, store, model?.let { ModelMergeJudge(it, dependencies.judgeModelId) })
+                    LatticeGraph(graphEmbedder, config, now, store, model?.let { ModelMergeJudge(it, dependencies.judgeModelId) })
                 },
             ).get()
         } catch (e: ExecutionException) {
@@ -265,6 +280,8 @@ internal class DefaultLattice(
             deadLetter = dependencies.deadLetter,
             // Inline on the narration thread, so the pipeline's awaitIdle covers the formation it starts.
             onChatDrained = { chatKey -> periods?.chatDrained(chatKey) },
+            extractParallelism = settings.extractParallelism.coerceAtLeast(1),
+            extractExecutor = extractExecutor,
         )
     }
 
@@ -508,18 +525,42 @@ internal class DefaultLattice(
         try {
             return ex.extract(chunk.text, referenceTime)
         } catch (e: UnparseableExtractionException) {
-            val entry = DeadLetterEntry(
-                reason = e.message ?: "unparseable extraction",
-                phase = "capture",
-                sourceMessageId = chunk.sourceMessageId,
-                referenceTime = referenceTime.toString(),
-                transcript = chunk.text,
-                rawOutput = e.rawOutput,
-            )
-            runCatching { dependencies.deadLetter.record(entry) }
-                .onFailure { logger.warn("Lattice {} dead letter not recorded: {}", name, it.message) }
-            logger.warn("Lattice {} capture: the model's answer did not parse (dead-lettered)", name)
+            deadLetter(chunk, referenceTime, e)
             throw e
+        }
+    }
+
+    private fun deadLetter(chunk: TranscriptRenderer.Rendered, referenceTime: Instant, e: UnparseableExtractionException) {
+        val entry = DeadLetterEntry(
+            reason = e.message ?: "unparseable extraction",
+            phase = "capture",
+            sourceMessageId = chunk.sourceMessageId,
+            referenceTime = referenceTime.toString(),
+            transcript = chunk.text,
+            rawOutput = e.rawOutput,
+        )
+        runCatching { dependencies.deadLetter.record(entry) }
+            .onFailure { logger.warn("Lattice {} dead letter not recorded: {}", name, it.message) }
+        logger.warn("Lattice {} capture: the model's answer did not parse (dead-lettered)", name)
+    }
+
+    /**
+     * The vectors of every memory and quote [extraction] will write, embedded in one call off the graph thread; empty
+     * when the embedder fails (the ingest then embeds as it always does, and fails as it would have).
+     */
+    private fun embedAhead(extraction: Extraction): Map<String, FloatArray> {
+        val texts = LinkedHashSet<String>()
+        for (memory in extraction.memories) {
+            texts += memory.content
+            memory.quotes.forEach { texts += it.text }
+        }
+        if (texts.isEmpty()) return emptyMap()
+        return try {
+            val vectors = embedder.embedAll(texts.toList())
+            if (vectors.size == texts.size) texts.zip(vectors).toMap() else emptyMap()
+        } catch (e: Exception) {
+            logger.debug("Lattice {} capture: embedding a chunk ahead failed; its ingest embeds it: {}", name, e.message)
+            emptyMap()
         }
     }
 
@@ -549,6 +590,63 @@ internal class DefaultLattice(
             if (extraction.memories.isEmpty()) return 0
             graphAccess.withGraph { g -> ingest(g, chunk, extraction, sceneId) }
             return extraction.memories.size
+        }
+
+        /**
+         * [capture] made ahead: the model call and the embedding of what it extracted run here, on an extraction
+         * thread; the dead letter, the ingest (with those vectors) and the count wait for [ExtractedChunk.apply].
+         */
+        override fun extract(transcript: Transcript): ExtractedChunk {
+            val chunk = TranscriptRenderer.render(transcript, zone)
+            if (chunk.text.isBlank()) return ExtractedChunk { 0 }
+            val referenceTime = chunk.referenceTime ?: now()
+            val extraction = try {
+                ex.extract(chunk.text, referenceTime)
+            } catch (e: UnparseableExtractionException) {
+                return ExtractedChunk {
+                    deadLetter(chunk, referenceTime, e)
+                    throw e
+                }
+            } catch (e: Exception) {
+                return ExtractedChunk { throw e }
+            }
+            if (extraction.memories.isEmpty()) return ExtractedChunk { 0 }
+            val vectors = embedAhead(extraction)
+            return ExtractedChunk { sceneId ->
+                graphAccess.withGraph { g -> graphEmbedder.answering(vectors) { ingest(g, chunk, extraction, sceneId) } }
+                extraction.memories.size
+            }
+        }
+    }
+
+    /**
+     * The host's embedder, answering a text from [answering]'s vectors while its block runs on the calling thread (the
+     * graph thread, ingesting a chunk embedded ahead); every other text goes to the host's embedder. A vector embedded
+     * ahead is the one the ingest would have asked for: the same text, the same embedder.
+     */
+    private class AheadEmbedder(private val delegate: Embedder) : Embedder {
+        private val ahead = ThreadLocal<Map<String, FloatArray>?>()
+
+        override val model: String get() = delegate.model
+        override val dimension: Int get() = delegate.dimension
+
+        override fun embed(text: String): FloatArray = ahead.get()?.get(text)?.copyOf() ?: delegate.embed(text)
+
+        override fun embedAll(texts: List<String>): List<FloatArray> {
+            val known = ahead.get() ?: return delegate.embedAll(texts)
+            val missing = texts.filter { it !in known }.distinct()
+            val fetched = if (missing.isEmpty()) emptyMap() else missing.zip(delegate.embedAll(missing)).toMap()
+            return texts.map { known[it]?.copyOf() ?: fetched.getValue(it) }
+        }
+
+        fun <T> answering(vectors: Map<String, FloatArray>, block: () -> T): T {
+            if (vectors.isEmpty()) return block()
+            ahead.set(vectors)
+            try {
+                return block()
+            } finally {
+                ahead.remove()
+            }
         }
     }
 
@@ -860,7 +958,7 @@ internal class DefaultLattice(
      */
     internal suspend fun reload(): Unit = call {
         onGraph {
-            val fresh = LatticeGraph(embedder, reloadConfig, now, store, model?.let { ModelMergeJudge(it, dependencies.judgeModelId) })
+            val fresh = LatticeGraph(graphEmbedder, reloadConfig, now, store, model?.let { ModelMergeJudge(it, dependencies.judgeModelId) })
             graph = fresh
             periods?.publisher?.reseed(fresh)
             logger.info("Lattice {} reloaded its graph from the store: {} engrams", name, fresh.size)
@@ -873,7 +971,8 @@ internal class DefaultLattice(
      * Refuses new calls, waits up to [LatticeSettings.shutdownTimeout] for the calls in flight (a running sleep stops at
      * its next step) and then for the scene work queued so far, then stops the threads and flushes and closes the store
      * as the graph thread's last task. Work still running at the deadline is interrupted on the capture and narration
-     * threads (a scene model call cut off this way counts no attempt) and work still queued there is dropped, failing
+     * threads (a scene model call cut off this way counts no attempt; an extraction call made ahead is cut off once the
+     * capture thread has stopped, as nothing takes its result any more) and work still queued there is dropped, failing
      * whoever waits on it with [IllegalStateException]. The graph thread is never interrupted: it gets another
      * [LatticeSettings.shutdownTimeout] of its own to run what is queued, and if it is still busy after that the store
      * closes when its last task ends, never before. A second close waits for the first.
@@ -908,6 +1007,8 @@ internal class DefaultLattice(
         }
         withContext(Dispatchers.IO) {
             stop(captureExecutor, remaining(), interrupt = true)
+            // Once the capture thread is done nothing takes an extraction made ahead: a call still running is cut off.
+            extractExecutor?.let { stop(it, Duration.ZERO, interrupt = true) }
             stop(narrationExecutor, remaining(), interrupt = true)
             // The graph gets a wait of its own (its tasks are short); the store closes once its last task has run.
             closeStoreOnStop = true
@@ -965,6 +1066,7 @@ internal class DefaultLattice(
 
     private fun shutdownExecutors() {
         captureExecutor.shutdownNow()
+        extractExecutor?.shutdownNow()
         narrationExecutor.shutdownNow()
         graphExecutor.shutdownNow()
     }

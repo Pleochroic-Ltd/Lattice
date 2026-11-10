@@ -30,6 +30,21 @@ fun interface SceneChunkCapture {
      * an outage.
      */
     fun capture(transcript: Transcript, sceneId: Long?): Int
+
+    /**
+     * The model half of [capture], for a chunk extracted ahead of its turn (the pipeline's ordered apply): it may run on
+     * any thread, at the same time as other chunks' calls, and must read no graph state, write nothing and record
+     * nothing. Every effect, a dead letter included, belongs to the returned [ExtractedChunk.apply], which the pipeline
+     * runs on the capture thread in chunk order, or never (a chunk after one that stopped its scene is dropped unseen).
+     * Never throws: a failure is thrown by apply, as [capture] would throw it. By default nothing runs ahead.
+     */
+    fun extract(transcript: Transcript): ExtractedChunk = ExtractedChunk { sceneId -> capture(transcript, sceneId) }
+}
+
+/** One chunk extracted ahead of its turn ([SceneChunkCapture.extract]), waiting to be written. */
+fun interface ExtractedChunk {
+    /** Writes the chunk's memories, as members of scene [sceneId] when it is set; returns and throws as [SceneChunkCapture.capture]. */
+    fun apply(sceneId: Long?): Int
 }
 
 /**
@@ -52,7 +67,9 @@ fun interface SceneChunkCapture {
  *
  * Threads: segmentation, extraction and all bookkeeping run on [captureExecutor], narration on [narrationExecutor];
  * both must run their tasks one at a time, in order. Every graph access goes through [graph]. The public calls return
- * at once except [catchUp] and [awaitIdle].
+ * at once except [catchUp] and [awaitIdle]. With [extractParallelism] above 1 and an [extractExecutor], the model calls
+ * of the next chunks run ahead on that executor while the capture thread applies their results one at a time, in the
+ * order and with the outcomes a serial pass would give them ([Ahead]).
  *
  * Scenes of different conversations of a chat are ordered by [SCENE_ORDER], never by position (positions are per
  * conversation) and never by id (ids are per device slot).
@@ -80,6 +97,13 @@ class ScenePipeline(
      */
     onChatDrained: (chatKey: String) -> Unit = {},
     private val chunkSize: Int = CHUNK_SIZE,
+    /**
+     * Extraction calls in flight at a time. Above 1 (with [extractExecutor]) they run ahead of the capture thread, which
+     * still applies them in chunk order; 1 = each call on the capture thread when its turn comes.
+     */
+    private val extractParallelism: Int = 1,
+    /** Runs the calls made ahead; it should have [extractParallelism] threads. Null = none run ahead. */
+    private val extractExecutor: Executor? = null,
 ) {
     private val logger = LoggerFactory.getLogger(ScenePipeline::class.java)
 
@@ -303,10 +327,7 @@ class ScenePipeline(
         val next = cursor.copy(segmentedThrough = run.last().position, segmentAttempts = 0, blockedSince = null)
         val touched = commit(info, cursor, rangeStart, planned, open?.first, next)
         if (open != null && planned.first().continues.not()) reevaluate(open.first.sceneId)
-        for (sceneId in touched) {
-            extractScene(sceneId, pass)
-            reevaluate(sceneId)
-        }
+        extractScenes(touched, pass)
         return next
     }
 
@@ -445,11 +466,7 @@ class ScenePipeline(
             }.sortedWith(SCENE_ORDER).map { it.sceneId to it.conversationId }
         }
         val hosted = Hosted()
-        for ((sceneId, conversation) in pending) {
-            if (!hosted(conversation)) continue
-            extractScene(sceneId, pass)
-            reevaluate(sceneId)
-        }
+        extractScenes(pending.filter { (_, conversation) -> hosted(conversation) }.map { it.first }, pass)
     }
 
     private fun pendingExtraction(scene: SceneRecord, work: SceneWorkRecord): Boolean =
@@ -457,41 +474,97 @@ class ScenePipeline(
             (work.extractedThrough ?: Long.MIN_VALUE) < scene.lastMessageId
 
     /**
-     * Extracts the scene's messages after [SceneWorkRecord.extractedThrough] in chunks of at most [chunkSize] said
-     * messages; stops at a chunk that fails short of its cap (the next pass retries it). A chunk is tainted by anything
-     * untrusted in its scene up to its end, not only within it: the extractor sees the chunk alone, so an answer that
-     * repeats an untrusted message of an earlier chunk would otherwise pass for the assistant's own words.
+     * Extracts each of [sceneIds] in turn ([extractScene]) and hands it to narration once its extraction stops
+     * ([reevaluate]). With [extractParallelism] above 1 the model calls run [Ahead]; the outcome is the serial one.
      */
-    private fun extractScene(sceneId: Long, pass: Pass) {
+    private fun extractScenes(sceneIds: List<Long>, pass: Pass) {
+        val executor = extractExecutor
+        val ahead = if (executor != null && extractParallelism > 1 && sceneIds.isNotEmpty()) Ahead(sceneIds, extractParallelism, executor) else null
+        try {
+            sceneIds.forEachIndexed { i, sceneId ->
+                extractScene(sceneId, pass, ahead?.Scene(i))
+                reevaluate(sceneId)
+            }
+        } finally {
+            ahead?.close()
+        }
+    }
+
+    /** What a scene has left to extract, as [extractScene] reads it. */
+    private sealed interface ScenePlan {
+        /** Nothing: the scene is gone or nothing of it is pending. */
+        data object Done : ScenePlan
+
+        /** The pending range [start].. read back nothing. */
+        class Unread(val scene: SceneRecord, val start: Long) : ScenePlan
+
+        /** The pending range in chunks (none when it holds no said message). */
+        class Chunks(val scene: SceneRecord, val chunks: List<Chunk>) : ScenePlan
+    }
+
+    /** One chunk of a scene: its transcript, its first said position, the position it settles through, its size. */
+    private class Chunk(val transcript: Transcript, val from: Long, val end: Long, val size: Int)
+
+    /**
+     * The scene's messages after [SceneWorkRecord.extractedThrough], in chunks of at most [chunkSize] said messages. A
+     * chunk is tainted by anything untrusted in its scene up to its end, not only within it: the extractor sees the
+     * chunk alone, so an answer that repeats an untrusted message of an earlier chunk would otherwise pass for the
+     * assistant's own words.
+     */
+    private fun planScene(sceneId: Long): ScenePlan {
         val (scene, start) = graph.withGraph { g ->
             val scene = g.scene(sceneId)
             val work = g.sceneWork(sceneId)
             if (scene == null || work == null || !pendingExtraction(scene, work)) null to null
             else scene to (work.extractedThrough ?: (scene.firstMessageId - 1)) + 1
         }
-        if (scene == null || start == null) return
+        if (scene == null || start == null) return ScenePlan.Done
         val read = source.messages(scene.conversationId, scene.firstMessageId, scene.lastMessageId)
         val messages = read.filter { it.position >= start }
-        if (messages.isEmpty()) {
-            unreadRange(scene, start)
-            return
-        }
+        if (messages.isEmpty()) return ScenePlan.Unread(scene, start)
         // Taint carries forward through the scene, from before the pending part too.
         val firstTainted = read.firstOrNull { it.tainted }?.position
         val chunks = messages.filter { it.said }.chunked(chunkSize)
-        for ((i, chunk) in chunks.withIndex()) {
-            // The last chunk settles the whole range, trailing host and tool messages included.
-            val end = if (i == chunks.lastIndex) scene.lastMessageId else chunk.last().position
-            val from = chunk.first().position
-            val transcript = Transcript(
-                chunk.map { it.transcriptLine() },
-                Transcript.Source(scene.chatKey, scene.conversationId),
-                tainted = firstTainted != null && firstTainted <= end,
-            )
-            val outcome = runCatching { capture.capture(transcript, sceneId) }
+        return ScenePlan.Chunks(
+            scene,
+            chunks.mapIndexed { i, chunk ->
+                // The last chunk settles the whole range, trailing host and tool messages included.
+                val end = if (i == chunks.lastIndex) scene.lastMessageId else chunk.last().position
+                val transcript = Transcript(
+                    chunk.map { it.transcriptLine() },
+                    Transcript.Source(scene.chatKey, scene.conversationId),
+                    tainted = firstTainted != null && firstTainted <= end,
+                )
+                Chunk(transcript, chunk.first().position, end, chunk.size)
+            },
+        )
+    }
+
+    /**
+     * Extracts the scene's pending chunks ([planScene]) in order; stops at a chunk that fails short of its cap (the next
+     * pass retries it). [ahead] = the chunks' calls were made ahead: their results are taken from it.
+     */
+    private fun extractScene(sceneId: Long, pass: Pass, ahead: Ahead.Scene? = null) {
+        val plan = ahead?.plan() ?: planScene(sceneId)
+        when (plan) {
+            ScenePlan.Done -> return
+            is ScenePlan.Unread -> {
+                unreadRange(plan.scene, plan.start)
+                return
+            }
+            is ScenePlan.Chunks -> Unit
+        }
+        val scene = plan.scene
+        for ((i, chunk) in plan.chunks.withIndex()) {
+            val from = chunk.from
+            val end = chunk.end
+            val outcome = runCatching {
+                if (ahead != null) ahead.take(i).apply(sceneId) else capture.capture(chunk.transcript, sceneId)
+            }
             val failure = outcome.exceptionOrNull()
             if (failure != null && (failure.isMemoryModelShutdown() || failure.isMemoryModelInterrupted())) {
                 logger.info("Scene chunk extraction cut off scene={} messages={}..{}; nothing counted", sceneId, from, end)
+                ahead?.cutOff()
                 return
             }
             val settled = settle { g ->
@@ -511,12 +584,140 @@ class ScenePipeline(
                 logger.warn("Scene chunk given up after {} attempts scene={} messages={}..{}: {}", MAX_CHUNK_ATTEMPTS, sceneId, from, end, failure.message)
             } else {
                 logger.warn("Scene chunk failed scene={} messages={}..{}: {}", sceneId, from, end, failure.message)
+                ahead?.stop()
                 return
             }
         }
-        if (chunks.isEmpty()) {
+        if (plan.chunks.isEmpty()) {
             graph.withGraph { g -> g.sceneWork(sceneId)?.let { g.putSceneState(work = it.copy(extractedThrough = scene.lastMessageId)) } }
         }
+    }
+
+    /**
+     * Ordered apply: the model calls of the chunks of [sceneIds], in order, run on [executor] up to [window] ahead of the
+     * chunk the capture thread is applying; the capture thread still applies every result itself, one at a time, in
+     * chunk order, with the serial bookkeeping ([extractScene]). Used on the capture thread only.
+     *
+     * Why the graph ends up as a serial pass would leave it:
+     *  - A call reads no graph state ([SceneChunkCapture.extract]); its input is the chunk's transcript, and a scene's
+     *    chunks ([planScene]) depend only on its record, its extraction progress and its messages. The capture thread is
+     *    the only writer of the first two for a scene still pending (narration takes a scene only once nothing of it is
+     *    pending, and never moves its range back), so a scene planned when the window first reaches it is planned as it
+     *    would be in its turn. A plan that fails is thrown when the scene's turn comes, and nothing after it is planned.
+     *  - A result is applied only where the serial loop would have extracted that chunk: the chunks after one that stops
+     *    its scene are dropped unseen ([stop]), and after a call cut off by the shutdown or an interrupt every chunk
+     *    still ahead is extracted again by a call started after it ([cutOff]). Dropped calls are cancelled without an
+     *    interrupt, so a call already running ends normally and its result is discarded.
+     *  - An interrupt of the capture thread while it waits cuts off the chunk it waits for, interrupts every call ahead
+     *    and leaves the interrupt set, as the interrupted call itself would have.
+     */
+    private inner class Ahead(private val sceneIds: List<Long>, private val window: Int, private val executor: Executor) {
+        private inner class Job(val chunk: Chunk) {
+            var task: FutureTask<ExtractedChunk>? = null
+        }
+
+        private val plans = ArrayList<Result<ScenePlan>>()
+
+        /** The index in [jobs] of each planned scene's first chunk. */
+        private val first = ArrayList<Int>()
+        private val jobs = ArrayList<Job>()
+        private var planFailed = false
+
+        /** The first job not yet taken or dropped: the window runs from here. */
+        private var next = 0
+
+        /** The scene at [index] of [sceneIds]. */
+        inner class Scene(private val index: Int) {
+            fun plan(): ScenePlan {
+                while (plans.size <= index) planNext()
+                val start = first[index]
+                if (next < start) drop(next, start)
+                next = maxOf(next, start)
+                fill()
+                return plans[index].getOrThrow()
+            }
+
+            /** Chunk [k]'s extraction, waiting for its call; the window moves on past it. */
+            fun take(k: Int): ExtractedChunk {
+                val job = first[index] + k
+                next = job
+                fill()
+                val task = checkNotNull(jobs[job].task)
+                val extracted = try {
+                    task.get()
+                } catch (e: InterruptedException) {
+                    for (j in jobs) j.task?.cancel(true)
+                    Thread.currentThread().interrupt()
+                    throw MemoryModelInterruptedException("Waiting for a scene chunk's extraction was interrupted.", e)
+                } catch (e: ExecutionException) {
+                    val cause = e.cause ?: e
+                    ExtractedChunk { throw cause }
+                }
+                jobs[job].task = null // taken: never submitted again, and its result is not held past its apply
+                next = job + 1
+                fill()
+                return extracted
+            }
+
+            /** The scene stopped at a chunk: its later chunks are never applied. */
+            fun stop() {
+                val end = first.getOrNull(index + 1) ?: jobs.size
+                if (next < end) drop(next, end)
+                next = maxOf(next, end)
+            }
+
+            /** A call was cut off: the scene stops, and every chunk still ahead gets a call started after this. */
+            fun cutOff() {
+                stop()
+                for (j in next until jobs.size) {
+                    jobs[j].task?.cancel(false)
+                    jobs[j].task = null
+                }
+            }
+        }
+
+        private fun planNext() {
+            val index = plans.size
+            val plan = runCatching { planScene(sceneIds[index]) }
+            plans += plan
+            first += jobs.size
+            (plan.getOrNull() as? ScenePlan.Chunks)?.chunks?.forEach { jobs += Job(it) }
+            if (plan.isFailure) planFailed = true
+        }
+
+        /** Keeps the calls of the next [window] chunks in flight, planning scenes as the window reaches them. */
+        private fun fill() {
+            while (jobs.size < next + window && plans.size < sceneIds.size && !planFailed) planNext()
+            for (j in next until minOf(jobs.size, next + window)) {
+                val job = jobs[j]
+                if (job.task == null) job.task = submit(job.chunk)
+            }
+        }
+
+        private fun submit(chunk: Chunk): FutureTask<ExtractedChunk> {
+            val task = FutureTask(
+                Callable {
+                    try {
+                        capture.extract(chunk.transcript)
+                    } catch (e: Exception) {
+                        ExtractedChunk { throw e }
+                    }
+                },
+            )
+            try {
+                executor.execute(task)
+            } catch (e: RejectedExecutionException) {
+                task.run() // the executor is shut down: the call runs here, in its turn
+            }
+            return task
+        }
+
+        private fun drop(from: Int, to: Int) {
+            for (j in from until to) jobs[j].task?.cancel(false)
+        }
+
+        /** The pass is over (or failed): calls not yet taken are dropped. */
+        fun close() = drop(next, jobs.size)
     }
 
     /**

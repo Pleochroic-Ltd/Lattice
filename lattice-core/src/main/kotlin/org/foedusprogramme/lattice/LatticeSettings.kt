@@ -37,6 +37,14 @@ data class LatticeSettings(
     /** Most model-judged pairs a sleep reviews. */
     val judgeBudget: Int = 1000,
     val judgeParallelism: Int = 4,
+    /**
+     * Scene extraction calls in flight at a time. Above 1 the model calls of a conversation's chunks run ahead on a pool
+     * of this many threads, each also embedding the memories it extracted in one call, while their results are still
+     * written one at a time, in chunk order, so the graph ends up as a serial capture would leave it (the ordered
+     * apply of [org.foedusprogramme.lattice.core.ScenePipeline]). 1 = one call at a time, on the capture thread: an interactive host's default, which never sends
+     * a burst of calls at its model.
+     */
+    val extractParallelism: Int = 1,
     val valueAwareFold: Boolean = true,
     val judgedMergesOnly: Boolean = false,
     val episodicSessionNodes: Boolean = true,
