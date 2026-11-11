@@ -342,6 +342,21 @@ class LatticeGraph(
         val recencyGain: Double = 0.0,
         /** Half-life (hours) for the recency term when [recencyGain] > 0. */
         val recencyHalfLifeHours: Double = 168.0,
+        /**
+         * EXPLICIT search only: the exponent on salience in the ranking's salience factor, `0.5 + 0.5 · salience^k`
+         * (see [rankScore]). Bjork's "new theory of disuse" separates storage strength (how well a memory was
+         * learned; it does not decay) from retrieval strength (how accessible it is now; it decays with disuse and
+         * comes back with use). Salience here plays retrieval strength: it decays in time and recovers on recall.
+         * A passive per-turn recall is cued by the conversation and rightly bound to it. A deliberate search is
+         * effortful recall, which reaches well-stored memories whose accessibility has faded, so it leans less on
+         * decayed salience. With k = 0.5 the factor reads `sqrt(salience)`: since salience decays as
+         * `s0 · λ^t`, its square root decays as `sqrt(s0) · λ^(t/2)` — the search sees decay at half speed (every
+         * salience half-life doubled) and the log-ratio between any two saliences halved. It is monotone, so it
+         * never puts a weaker memory above a stronger one of equal activation, and use still counts. 1.0 =
+         * legacy (the passive and the explicit ranking alike). Forgetting is untouched: what decay
+         * pruned stays gone.
+         */
+        val explicitSalienceExponent: Double = 1.0,
         /** Rank multiplier applied to a memory that has been superseded by a newer one. */
         val supersededPenalty: Double = 0.25,
         /** Rank multiplier applied to an episode (whole-session summary) node, so a broad session
@@ -555,6 +570,11 @@ class LatticeGraph(
                 explicitSeedFloor = 0.40,
                 explicitEventRank = 1.1,
                 explicitPlanRank = 0.9,
+                // A deliberate search reads salience (retrieval strength) as if it had decayed at half speed: a
+                // one-off semantic fact 30 weeks old (0.7 · 0.98^30 ≈ 0.38) against a memory passive recall keeps
+                // at its 0.7 cap ranks 0.81 : 0.92 instead of 0.69 : 0.85, a gap the size of bge-m3's on-target
+                // vs related cosine margin (0.72-0.79 vs ~0.64) rather than one that outweighs it.
+                explicitSalienceExponent = 0.5,
                 // "Four weeks ago", "上周": the memories said (or dated) in that window, most relevant first.
                 dayWindowRecall = true,
                 // Enabled: only an explicit search breadth cue engages it (passive per-turn path
@@ -1258,7 +1278,7 @@ class LatticeGraph(
             if (prev == null || target.activation > prev.activation) redirected[targetId] = target
         }
 
-        val ranked = redirected.values.sortedByDescending { rankScore(it) }
+        val ranked = redirected.values.sortedByDescending { rankScore(it, explicit) }
         // Aggregative-cue breadth (explicit search only, behind the master switch): on a fired
         // "summarize / what changed" cue, append the community-parent's ABSTRACTS members instead of the
         // narrow meaningful-spread slots. Any gate miss falls straight back to appendMeaningfulSpread, so
@@ -1309,7 +1329,7 @@ class LatticeGraph(
         // Contract (b): a resolved POINT anchor order-nudges the base toward its focal month. Applied AFTER
         // reinforcement (which ran over the base as a SET) so the fold — a permutation + untouched append
         // tail — cannot change what the graph learned, only the surfaced order.
-        return if (temporalAnchor != null && config.temporalRerank) timeFold(hits, temporalAnchor, limit) else hits
+        return if (temporalAnchor != null && config.temporalRerank) timeFold(hits, temporalAnchor, limit, explicit) else hits
     }
 
     /**
@@ -1319,14 +1339,14 @@ class LatticeGraph(
      * (so undated hits keep their relative rank via the stable sort). NO cosine, NO membership change — a
      * pure permutation of a set the semantic path already fixed, so it can never admit an off-topic hit.
      */
-    private fun timeFold(hits: List<Activation>, anchor: TemporalAnchor, limit: Int): List<Activation> {
+    private fun timeFold(hits: List<Activation>, anchor: TemporalAnchor, limit: Int, explicit: Boolean): List<Activation> {
         val base = hits.take(limit)
         val tail = hits.drop(limit)
         val ref = anchor.yearMonth
         val reordered = base.sortedByDescending { a ->
             val ym = a.engram.eventYearMonth?.let { runCatching { YearMonth.parse(it) }.getOrNull() }
             val tProx = if (ym == null) 0.0 else 0.5.pow(monthDist(ym, ref).toDouble() / config.temporalRerankHalflifeMonths)
-            rankScore(a) * (1.0 + config.temporalRerankLambda * tProx)
+            rankScore(a, explicit) * (1.0 + config.temporalRerankLambda * tProx)
         }
         return reordered + tail
     }
@@ -1906,11 +1926,14 @@ class LatticeGraph(
     /**
      * Retrieval ranking: activation weighted by salience, then discounted if the memory has
      * been superseded by a newer one, and (when [Config.recencyGain] > 0) nudged toward the
-     * more recently encountered memory so a stale fact does not outrank its replacement.
+     * more recently encountered memory so a stale fact does not outrank its replacement. An [explicit]
+     * search reads salience through [Config.explicitSalienceExponent] (storage vs retrieval strength).
      */
-    private fun rankScore(a: Activation): Double {
+    private fun rankScore(a: Activation, explicit: Boolean = false): Double {
         val e = a.engram
-        var score = a.activation * (0.5 + 0.5 * e.salience)
+        val k = config.explicitSalienceExponent
+        val salience = if (explicit && k != 1.0) e.salience.coerceIn(0.0, 1.0).pow(k) else e.salience
+        var score = a.activation * (0.5 + 0.5 * salience)
         if (e.supersededBy != null) score *= config.supersededPenalty
         if (e.isEpisode) score *= config.episodeRankPenalty
         if (config.recencyGain > 0.0) {

@@ -45,7 +45,9 @@ class LatticeGraphTimeFoldTest {
 
     private fun graph(rerank: Boolean = true) = LatticeGraph(
         MultiAxisEmbedder(),
-        LatticeGraph.Config.bgeM3().copy(temporalLayer = true, temporalRetrieval = true, temporalRerank = rerank),
+        // The fold alone: the explicit search's damped salience (explicitSalienceExponent) would narrow the base gaps
+        // these cases are built on.
+        LatticeGraph.Config.bgeM3().copy(temporalLayer = true, temporalRetrieval = true, temporalRerank = rerank, explicitSalienceExponent = 1.0),
         now = fixedClock,
     )
 
