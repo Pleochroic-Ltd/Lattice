@@ -55,6 +55,7 @@ object TranscriptRenderer {
      * @property referenceTime what "today" resolves against: [Transcript.referenceTime], else [saidTo]; null when no
      *   line has a time (the caller then uses its clock, as [Transcript.referenceTime] says).
      * @property tainted [Transcript.tainted], carried along.
+     * @property namedLines the extracted user lines that name their speaker, as (name, text): who said a quote.
      */
     data class Rendered(
         val text: String,
@@ -63,6 +64,7 @@ object TranscriptRenderer {
         val saidTo: Instant?,
         val referenceTime: Instant?,
         val tainted: Boolean,
+        val namedLines: List<Pair<String, String>> = emptyList(),
     )
 
     /**
@@ -142,6 +144,9 @@ object TranscriptRenderer {
             saidTo = saidTo,
             referenceTime = transcript.referenceTime ?: saidTo,
             tainted = transcript.tainted,
+            namedLines = targets.mapNotNull { l ->
+                l.speakerName?.trim()?.takeIf { it.isNotEmpty() && l.role == Transcript.Role.USER }?.let { it to l.text }
+            },
         )
     }
 }

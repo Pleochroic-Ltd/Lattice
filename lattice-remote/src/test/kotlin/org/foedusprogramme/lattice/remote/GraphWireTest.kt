@@ -32,6 +32,7 @@ class GraphWireTest {
         assertEquals("AAAAPwAAAL/zBDU/AQAAAA==", (wire["embedding"] as JsonPrimitive).content)
         assertEquals("2026-07-23T08:00:00.123456789Z", (wire["saidTo"] as JsonPrimitive).content)
         assertEquals("true", wire["tainted"].toString())
+        assertEquals("Caroline", (wire["speakerName"] as JsonPrimitive).content)
         val back = (GraphWire.decode(JSON.parseToJsonElement(op.toString()).jsonObject) as WireOp.Mirror).change.row
         assertEngram(engram, (back as InMemoryLatticeStore.Row.EngramRow).engram)
     }

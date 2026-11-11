@@ -25,6 +25,8 @@ object NativeMemoryIngestor {
      * @param saidTo last source-message time.
      * @param zone the zone the span's calendar days are read in (the future-date check).
      * @param tainted the capture read untrusted content; every engram it writes or folds into is tainted.
+     * @param namedLines the capture's user lines that name their speaker, as (name, text): a person's quote is
+     *   attributed to whoever said it ([quoteSpeaker]); empty = every person's quote is the user's, as before.
      */
     fun ingest(
         graph: LatticeGraph,
@@ -35,6 +37,7 @@ object NativeMemoryIngestor {
         saidTo: Instant? = null,
         zone: ZoneId = ZoneOffset.UTC,
         tainted: Boolean = false,
+        namedLines: List<Pair<String, String>> = emptyList(),
     ): Map<String, Long> {
         val idByRef = HashMap<String, Long>()
         for (memory in extraction.memories) {
@@ -59,6 +62,7 @@ object NativeMemoryIngestor {
                 graph.addVerbatim(
                     gistId, quote.text, quote.speaker,
                     sourceMessageId = sourceMessageId, saidFrom = saidFrom, saidTo = saidTo, tainted = tainted,
+                    speakerName = if (quote.speaker == Speaker.USER) quoteSpeaker(quote, namedLines) else null,
                 )
             }
         }
@@ -74,6 +78,28 @@ object NativeMemoryIngestor {
             graph.addSceneMembers(sceneId, idByRef.values.toSet())
         }
         return idByRef
+    }
+
+    private val QUOTE_NOISE = Regex("[\\s\\p{Punct}“”‘’「」『』，。！？：；…]+")
+
+    private fun quoteKey(text: String): String = QUOTE_NOISE.replace(text.lowercase(), " ").trim()
+
+    /**
+     * Who said a person's [quote], when the capture's lines name their speakers ([namedLines], as (name, text)): the
+     * one speaker whose lines contain the quoted words (spacing, case and punctuation aside), else the name the model
+     * gave when it is one of those speakers (spelled as the transcript spells it); null when the lines name nobody or
+     * the quote can't be placed — the formatter then shows the user label, as before. Reading the words back from the
+     * transcript beats the model's word: between two named people it once gave both people's lines to "the user".
+     */
+    internal fun quoteSpeaker(quote: ExtractedQuote, namedLines: List<Pair<String, String>>): String? {
+        if (namedLines.isEmpty()) return null
+        val key = quoteKey(quote.text)
+        if (key.isNotEmpty()) {
+            val saidBy = namedLines.filter { (_, text) -> key in quoteKey(text) }.map { it.first }.distinct()
+            if (saidBy.size == 1) return saidBy.single()
+        }
+        val given = quote.speakerName?.trim()?.lowercase() ?: return null
+        return namedLines.map { it.first }.distinct().firstOrNull { it.lowercase() == given }
     }
 
     /**

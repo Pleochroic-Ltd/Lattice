@@ -574,6 +574,7 @@ internal class DefaultLattice(
             saidTo = chunk.saidTo ?: chunk.referenceTime,
             zone = zone,
             tainted = chunk.tainted,
+            namedLines = chunk.namedLines,
         )
         if (g.temporalRetrievalEnabled) pushFocus(ids.values.mapNotNull { g.engram(it)?.eventYearMonth })
     }

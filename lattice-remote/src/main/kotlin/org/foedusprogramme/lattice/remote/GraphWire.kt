@@ -203,6 +203,7 @@ internal object GraphWire {
         e.saidTo?.let { put("saidTo", it.toString()) }
         e.dueDate?.let { put("dueDate", it) }
         put("tainted", e.tainted)
+        e.speakerName?.let { put("speakerName", it) }
     }
 
     private fun engramOf(o: JsonObject): Engram {
@@ -229,6 +230,7 @@ internal object GraphWire {
             saidTo = o.instant("saidTo"),
             dueDate = o.string("dueDate"),
             tainted = o.bool("tainted") ?: false,
+            speakerName = o.string("speakerName"),
         )
     }
 

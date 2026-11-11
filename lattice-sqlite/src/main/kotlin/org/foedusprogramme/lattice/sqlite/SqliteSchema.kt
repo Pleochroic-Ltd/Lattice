@@ -6,7 +6,7 @@ package org.foedusprogramme.lattice.sqlite
  * schema test (`src/test/resources/golden/schema.sql`) fails on any drift from what the migrations produce.
  */
 internal object SqliteSchema {
-    val migrations: List<List<String>> = listOf(v1())
+    val migrations: List<List<String>> = listOf(v1(), v2())
 
     val version: Int get() = migrations.size
 
@@ -317,4 +317,7 @@ internal object SqliteSchema {
                 "BEGIN SELECT RAISE(ABORT, 'scene already belongs to a period'); END",
         )
     }.map { it.trimIndent() }
+
+    /** A person's quote keeps their name ([org.foedusprogramme.lattice.core.Engram.speakerName]). */
+    private fun v2(): List<String> = listOf("ALTER TABLE engram ADD COLUMN speaker_name TEXT")
 }

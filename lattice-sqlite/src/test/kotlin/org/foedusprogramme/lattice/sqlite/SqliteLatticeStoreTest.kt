@@ -58,6 +58,34 @@ class SqliteLatticeStoreTest {
     }
 
     @Test
+    fun `a version 1 file gains the quote speaker's name and keeps its engrams`() {
+        val path = dir.resolve("v1.db")
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
+            c.createStatement().use { st ->
+                SqliteSchema.migrations[0].forEach(st::execute)
+                st.execute("PRAGMA user_version = 1")
+                st.execute(
+                    "INSERT INTO engram (id, content, embedding, salience, layer, created_at, last_activated_at, speaker, " +
+                        "salience_decayed_at) VALUES (7, 'I love painting', x'0000803f', 0.6, 'EPISODIC', " +
+                        "'2026-07-22T00:00:00Z', '2026-07-22T00:00:00Z', 'USER', '2026-07-22T00:00:00Z')",
+                )
+            }
+        }
+        SqliteLatticeStore(path).use { store ->
+            val old = store.load().engrams.single()
+            assertEquals(7, old.id)
+            assertEquals(null, old.speakerName, "a quote written before names were kept is the user's")
+            store.putEngram(old.copy(speakerName = "Melanie"))
+        }
+        SqliteLatticeStore(path).use { store -> assertEquals("Melanie", store.load().engrams.single().speakerName) }
+        java.sql.DriverManager.getConnection("jdbc:sqlite:$path").use { c ->
+            c.createStatement().use { st ->
+                st.executeQuery("PRAGMA user_version").use { it.next(); assertEquals(2, it.getInt(1)) }
+            }
+        }
+    }
+
+    @Test
     fun `a new file is in WAL mode at the current schema version`() {
         val path = dir.resolve("graph.db")
         SqliteLatticeStore(path).use { store ->

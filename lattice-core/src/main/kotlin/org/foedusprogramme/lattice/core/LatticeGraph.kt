@@ -3741,11 +3741,14 @@ class LatticeGraph(
         saidTo: Instant? = null,
         /** Quoted from a turn that read untrusted content (see [Engram.tainted]). */
         tainted: Boolean = false,
+        /** A person's name, when the chat names its speakers (see [Engram.speakerName]). */
+        speakerName: String? = null,
     ): Long {
         val embedding = embedder.embed(quoteText)
-        // Fold only into another verbatim (speaker-tagged) near-duplicate, never a gist.
+        // Fold only into another verbatim (speaker-tagged) near-duplicate, never a gist — and only one by the same
+        // named person: the same words from two people are two utterances.
         val dup = nodes.values.asSequence()
-            .filter { it.speaker != null }
+            .filter { it.speaker != null && it.speakerName == speakerName }
             .map { it to cosine(it.embedding, embedding) }
             .filter { it.second >= config.dedupThreshold }
             // Value-aware: a quote stating a different value is a different utterance, kept word for word.
@@ -3783,6 +3786,7 @@ class LatticeGraph(
                 saidFrom = saidFrom ?: saidTo,
                 saidTo = saidTo ?: saidFrom,
                 tainted = tainted,
+                speakerName = speakerName?.takeIf { speaker == Speaker.USER },
             )
             nodes[e.id] = e
             adjacency[e.id] = HashMap()

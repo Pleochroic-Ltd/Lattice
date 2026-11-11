@@ -82,7 +82,7 @@ CREATE TABLE engram (
     said_to TEXT,
     due_date TEXT,
     tainted INTEGER NOT NULL DEFAULT 0
-);
+, speaker_name TEXT);
 
 -- table engram_entity
 CREATE TABLE engram_entity (

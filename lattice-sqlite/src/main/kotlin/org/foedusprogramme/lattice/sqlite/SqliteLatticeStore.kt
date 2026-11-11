@@ -333,6 +333,7 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
         saidTo = rs.getString("said_to")?.let(Instant::parse),
         dueDate = rs.getString("due_date"),
         tainted = rs.getInt("tainted") == 1,
+        speakerName = rs.getString("speaker_name"),
     )
 
     override fun putEngram(engram: Engram) = write {
@@ -346,8 +347,8 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
             """
             INSERT INTO engram (id, content, embedding, salience, layer, created_at, last_activated_at, activation_count,
                 soft_replays, speaker, source_message_id, is_episode, superseded_by, salience_decayed_at, event_date,
-                is_episode_hub, origin, said_from, said_to, due_date, tainted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_episode_hub, origin, said_from, said_to, due_date, tainted, speaker_name)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (id) DO UPDATE SET
                 content = excluded.content, embedding = excluded.embedding, salience = excluded.salience,
                 layer = excluded.layer, created_at = excluded.created_at, last_activated_at = excluded.last_activated_at,
@@ -356,13 +357,14 @@ class SqliteLatticeStore(path: Path) : LatticeStore {
                 is_episode = excluded.is_episode, superseded_by = excluded.superseded_by,
                 salience_decayed_at = excluded.salience_decayed_at, event_date = excluded.event_date,
                 is_episode_hub = excluded.is_episode_hub, origin = excluded.origin, said_from = excluded.said_from,
-                said_to = excluded.said_to, due_date = excluded.due_date, tainted = excluded.tainted
+                said_to = excluded.said_to, due_date = excluded.due_date, tainted = excluded.tainted,
+                speaker_name = excluded.speaker_name
             """,
             engram.id, engram.content, engram.embedding.toBlob(), engram.salience, engram.layer.name,
             engram.createdAt.toString(), engram.lastActivatedAt.toString(), engram.activationCount, engram.softReplays,
             engram.speaker?.name, engram.sourceMessageId, engram.isEpisode, engram.supersededBy,
             engram.salienceDecayedAt.toString(), engram.eventDate, engram.isEpisodeHub, engram.origin?.name,
-            engram.saidFrom?.toString(), engram.saidTo?.toString(), engram.dueDate, engram.tainted,
+            engram.saidFrom?.toString(), engram.saidTo?.toString(), engram.dueDate, engram.tainted, engram.speakerName,
         )
     }
 

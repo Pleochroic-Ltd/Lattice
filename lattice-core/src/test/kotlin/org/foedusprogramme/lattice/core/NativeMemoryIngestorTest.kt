@@ -81,6 +81,33 @@ class NativeMemoryIngestorTest {
     }
 
     @Test
+    fun aPersonsQuoteIsAttributedToWhoeverSaidItInTheTranscript() {
+        val lines = listOf(
+            "Caroline" to "I went to a LGBTQ support group yesterday and it was so powerful.",
+            "Melanie" to "Wow, that's cool, Caroline! What happened that was so awesome?",
+            "Caroline" to "The transgender stories were so inspiring!",
+        )
+        fun who(text: String, given: String? = null) = NativeMemoryIngestor.quoteSpeaker(ExtractedQuote(Speaker.USER, text, given), lines)
+        assertEquals("Caroline", who("The transgender stories were so inspiring!"))
+        assertEquals("Melanie", who("wow that's cool caroline", given = "Caroline"), "the words decide, over the model's name")
+        assertEquals("Melanie", who("Something said off the record", given = "melanie"), "else the model's name, as the transcript spells it")
+        assertEquals(null, who("Something said off the record", given = "Jon"), "a name nobody in the chunk has")
+        assertEquals(null, who("Something said off the record"))
+        assertEquals(null, NativeMemoryIngestor.quoteSpeaker(ExtractedQuote(Speaker.USER, "I like tea"), emptyList()), "no named lines: the user's")
+
+        val g = graph()
+        val ids = NativeMemoryIngestor.ingest(
+            g,
+            Extraction(listOf(memory("m1", "Caroline found the support group inspiring",
+                ExtractedQuote(Speaker.USER, "The transgender stories were so inspiring!"),
+                ExtractedQuote(Speaker.USER, "Wow, that's cool, Caroline! What happened that was so awesome?"))), emptyList()),
+            namedLines = lines,
+        )
+        val quotes = g.evidenceQuotes(ids.getValue("m1"))
+        assertEquals(setOf("Caroline", "Melanie"), quotes.mapNotNull { it.speakerName }.toSet())
+    }
+
+    @Test
     fun ingestRecordsTheSpanAndMovesAFutureDateToTheTarget() {
         val g = graph(LatticeGraph.Config(temporalLayer = true))
         val said = Instant.parse("2023-06-16T10:00:00Z")

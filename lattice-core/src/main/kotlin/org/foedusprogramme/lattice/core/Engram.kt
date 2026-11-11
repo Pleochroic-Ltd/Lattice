@@ -107,6 +107,11 @@ data class Engram(
      * it: a node that absorbs a tainted one is tainted.
      */
     var tainted: Boolean = false,
+    /**
+     * For a verbatim quote of a person ([Speaker.USER]): their name, when the chat names its speakers (a group chat,
+     * two people talking). Null = the user, named by the host's user label as before.
+     */
+    var speakerName: String? = null,
 ) {
     enum class Layer { EPISODIC, SEMANTIC }
 

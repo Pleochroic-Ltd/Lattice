@@ -704,6 +704,7 @@ abstract class LatticeStoreContract {
             saidTo = T1,
             dueDate = "2026-08",
             tainted = true,
+            speakerName = "Caroline",
         )
 
         fun assertEngram(expected: Engram, actual: Engram) {
@@ -728,6 +729,7 @@ abstract class LatticeStoreContract {
             assertEquals(expected.saidTo, actual.saidTo)
             assertEquals(expected.dueDate, actual.dueDate)
             assertEquals(expected.tainted, actual.tainted)
+            assertEquals(expected.speakerName, actual.speakerName)
         }
     }
 }

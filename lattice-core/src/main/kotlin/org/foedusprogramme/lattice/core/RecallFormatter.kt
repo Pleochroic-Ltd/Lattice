@@ -125,7 +125,8 @@ object RecallFormatter {
             } else {
                 gist + quotes.joinToString("") { q ->
                     val who = when (q.speaker) {
-                        Speaker.USER -> user
+                        // A named person's quote (a chat that names its speakers) carries their name.
+                        Speaker.USER -> q.speakerName?.takeIf { it.isNotBlank() } ?: user
                         Speaker.ASSISTANT -> markers.quoteSelf
                         null -> null
                     }

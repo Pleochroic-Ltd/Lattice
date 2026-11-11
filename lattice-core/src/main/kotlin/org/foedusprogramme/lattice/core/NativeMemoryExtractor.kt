@@ -337,7 +337,8 @@ class NativeMemoryExtractor(
             - quotes (optional): only when a memory hinges on an exact line worth remembering verbatim
               (the user's or your own). The quote MUST be a complete, meaningful sentence — never a
               bare term, label, or single word. Put the exact words in `quotes` with speaker "user"
-              or "assistant", in their original language. Most memories need no quote.
+              or "assistant", in their original language — or, when the line names its sender in a
+              Message Context, that sender's name as written there. Most memories need no quote.
             - If there is nothing worth keeping, return {"memories":[],"relations":[]}.
             """.trimIndent()
             // OFF: the base prompt alone — no date field in the shape, no date rules (the base still carries every
@@ -378,6 +379,9 @@ class NativeMemoryExtractor(
 
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
 
+        /** Quote speakers that name a role, not a person. */
+        private val ROLE_WORDS = setOf("user", "the user", "human", "person", "assistant", "model")
+
         /** Returns null when the output has no parseable JSON object (a failure); an [Extraction]
          *  (possibly empty) when it parsed. Callers treat null as "retry", empty as "kept nothing".
          *  A quote whose speaker is one of [assistantSpeakers] (lowercase) is the assistant's. */
@@ -416,12 +420,16 @@ class NativeMemoryExtractor(
                         val text = q["text"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                         // Drop fragment "quotes" (a bare term/label, not a memorable line, e.g. "技术债").
                         if (text.length < MIN_QUOTE_CHARS) return@mapNotNull null
-                        val speaker = when (val said = q["speaker"]?.jsonPrimitive?.contentOrNull?.trim()?.lowercase()) {
+                        val raw = q["speaker"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                        val speaker = when (raw.lowercase()) {
                             "assistant", "model" -> Speaker.ASSISTANT
                             in assistantSpeakers -> Speaker.ASSISTANT
                             else -> Speaker.USER
                         }
-                        ExtractedQuote(speaker, text)
+                        // A person's name the model gave (a chat that names its senders); the ingest checks it
+                        // against the chunk's senders. A role word is no name.
+                        val name = raw.takeIf { speaker == Speaker.USER && it.lowercase() !in ROLE_WORDS && it.isNotEmpty() }
+                        ExtractedQuote(speaker, text, name)
                     },
                 )
             }
@@ -595,10 +603,14 @@ data class ExtractedMemory(
     val quotes: List<ExtractedQuote> = emptyList(),
 )
 
-/** A verbatim quote anchored in a memory: who said it, and the exact words. */
+/**
+ * A verbatim quote anchored in a memory: who said it, and the exact words. [speakerName]: the person's name the model
+ * gave, for a chat that names its senders (checked against the transcript before it is kept).
+ */
 data class ExtractedQuote(
     val speaker: Speaker,
     val text: String,
+    val speakerName: String? = null,
 )
 
 data class ExtractedRelation(

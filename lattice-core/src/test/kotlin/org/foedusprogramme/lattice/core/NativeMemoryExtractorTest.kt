@@ -292,6 +292,19 @@ class NativeMemoryExtractorTest {
     }
 
     @Test
+    fun `a quote keeps the sender's name the model gave, never a role word`() {
+        val raw = """{"memories":[{"ref":"m1","content":"Caroline went to a support group","quotes":[
+            {"text":"The support group made me feel accepted","speaker":"Caroline"},
+            {"text":"That sounds wonderful, I'm proud of you","speaker":"Melanie"},
+            {"text":"I'll send you the list tonight","speaker":"user"},
+            {"text":"Glad to help you with that","speaker":"Mia"}]}],"relations":[]}"""
+        val quotes = NativeMemoryExtractor.parse(raw, setOf("mia"))!!.memories.single().quotes
+        assertEquals(listOf("Caroline", "Melanie", null, null), quotes.map { it.speakerName })
+        assertEquals(listOf(Speaker.USER, Speaker.USER, Speaker.USER, Speaker.ASSISTANT), quotes.map { it.speaker })
+        assertTrue("that sender's name as written there" in NativeMemoryExtractor.buildPrompt(null))
+    }
+
+    @Test
     fun `the extractor reads a due date and asks for it`() {
         val raw = """{"memories":[{"ref":"m1","content":"The user plans a trip to Kyoto","event_date":"2023-03-01",
             "due_date":"2023-10-05"}],"relations":[]}"""
