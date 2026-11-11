@@ -141,6 +141,58 @@ class PeriodFormerTest {
     }
 
     @Test
+    fun `one new scene numbered after the current period is read one lower - the current period is not a scene`() {
+        // The shape the model gave 544 times under reasoning off: the current period as scene 1, the new scene as 2.
+        val r = PeriodRig()
+        (1..3).forEach { r.scene("场景$it") }
+        r.formation.reply = FormationModel.continuing("最初的日子")
+        r.former().formChat(CHAT)
+        val current = r.periods().single().first
+
+        val turned = r.scene("场景4")
+        r.formation.reply = {
+            FormationModel.periods(FormationModel.entry(1, 1, "最初的日子", continues = true), FormationModel.entry(2, 2, "新的一段"))
+        }
+        assertEquals(Outcome.FORMED, r.former().formChat(CHAT))
+        assertEquals(0, r.failures(turned.sceneId), "no failure counted")
+        val prompt = r.formation.calls.last()
+        assertTrue("has no number" in PeriodFormer.SYSTEM_PROMPT, "the prompt says so")
+        assertEquals(1, FormationModel.newScenes(prompt))
+        val (closed, open) = r.periods()
+        assertEquals(current.id, closed.first.id)
+        assertEquals(PeriodState.CLOSED, closed.first.state, "the current period stays as it was, and closes")
+        assertEquals("最初的日子", closed.first.name)
+        assertEquals("新的一段" to listOf(turned.sceneId), open.first.name to open.second)
+        assertEquals(PeriodState.PROVISIONAL, open.first.state)
+
+        // Carried on: the current period plus the new scene as 1..2.
+        val more = r.scene("场景5")
+        r.formation.reply = { FormationModel.periods(FormationModel.entry(1, 2, "新的一段", continues = true)) }
+        assertEquals(Outcome.FORMED, r.former().formChat(CHAT))
+        assertEquals(listOf(turned.sceneId, more.sceneId), r.periods().last().second)
+        assertEquals(2, r.periods().size)
+    }
+
+    @Test
+    fun `realignCountedCurrent moves only an off-by-one reply that covers one past the new scenes`() {
+        fun e(first: Int, last: Int, continues: Boolean = false) = PeriodFormer.Entry(continues, first, last, "n$first", null)
+        fun realign(n: Int, vararg es: PeriodFormer.Entry, current: Boolean = true) =
+            PeriodFormer.realignCountedCurrent(es.toList(), n, current).map { Triple(it.continues, it.first, it.last) }
+        // n = 1: a zero-width continuation is dropped; a skipped 1 moves down.
+        assertEquals(listOf(Triple(false, 1, 1)), realign(1, e(1, 1, true), e(2, 2)))
+        assertEquals(listOf(Triple(false, 1, 1)), realign(1, e(2, 2)))
+        assertEquals(listOf(Triple(true, 1, 1)), realign(1, e(1, 2, true)))
+        // n = 3: a continuation that also took new scenes keeps them.
+        assertEquals(listOf(Triple(true, 1, 1), Triple(false, 2, 3)), realign(3, e(1, 2, true), e(3, 4)))
+        // Left alone: valid replies, other mistakes, no current period.
+        assertEquals(listOf(Triple(true, 1, 1), Triple(false, 2, 2)), realign(2, e(1, 1, true), e(2, 2)))
+        assertEquals(listOf(Triple(false, 1, 1)), realign(1, e(1, 1)))
+        assertEquals(listOf(Triple(true, 1, 1), Triple(false, 3, 3)), realign(2, e(1, 1, true), e(3, 3)), "a gap is not a numbering slip")
+        assertEquals(listOf(Triple(false, 1, 1), Triple(false, 2, 2)), realign(1, e(1, 1), e(2, 2)), "no continuation to explain the extra scene")
+        assertEquals(listOf(Triple(false, 2, 2)), realign(1, e(2, 2), current = false))
+    }
+
+    @Test
     fun `a current period named from a scene that is untrusted now is shown without its name, and a new name replaces its naming scenes`() {
         val r = PeriodRig()
         r.scene("场景1")

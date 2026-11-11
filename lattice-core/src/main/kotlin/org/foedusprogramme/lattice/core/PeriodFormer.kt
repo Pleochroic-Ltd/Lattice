@@ -348,7 +348,14 @@ class PeriodFormer(
                 recordDeadLetter(chatKey, firstInput, parsed.reason, prompt.text, reply)
                 return failed(r, failures, parsed.reason)
             }
-            is Parsed.Ok -> parsed.entries
+            is Parsed.Ok -> realignCountedCurrent(parsed.entries, plan.input.size, plan.current != null).also {
+                if (it !== parsed.entries) {
+                    logger.info(
+                        "Period formation reply numbered the current period as scene 1 chat={} input={} scene(s); read one lower",
+                        chatKey, plan.input.size,
+                    )
+                }
+            }
         }
         validate(entries, plan, snap)?.let { reason ->
             recordDeadLetter(chatKey, firstInput, reason, prompt.text, reply)
@@ -1085,6 +1092,34 @@ class PeriodFormer(
                 state == SceneWorkState.EXTRACTING || state == SceneWorkState.NARRATING
             } || g.sceneCursors().any { it.chatKey == chatKey && (it.segmentAttempts > 0 || it.fallbackThrough != null) }
 
+        /**
+         * [entries] with the model's commonest numbering slip undone: it numbered the current period as scene 1 and the
+         * new scenes from 2, so its periods run contiguously over 1..n+1 for n new scenes, either opening with a
+         * continuation that holds the current period ("continues_current", "last": 1 for the current period alone) or
+         * skipping 1 altogether. Every number moves one lower, and a continuation left with no new scene is dropped:
+         * the current period stays as it was, and the first new period starts at 1. Any other shape — a valid one, or one
+         * wrong in another way — comes back as it is (the same list), for [validate] to judge.
+         */
+        internal fun realignCountedCurrent(entries: List<Entry>, inputSize: Int, hasCurrent: Boolean): List<Entry> {
+            if (!hasCurrent || entries.isEmpty() || entries.last().last != inputSize + 1) return entries
+            val head = entries.first()
+            val countedCurrent = (head.continues && head.first == 1) || (!head.continues && head.first == 2)
+            if (!countedCurrent) return entries
+            var expected = head.first
+            for (e in entries) {
+                if (e.first != expected || e.last < e.first) return entries
+                expected = e.last + 1
+            }
+            val shifted = entries.mapIndexedNotNull { i, e ->
+                when {
+                    i == 0 && e.continues && e.last == 1 -> null
+                    i == 0 && e.continues -> e.copy(first = 1, last = e.last - 1)
+                    else -> e.copy(first = e.first - 1, last = e.last - 1)
+                }
+            }
+            return shifted.ifEmpty { entries }
+        }
+
         /** Appended to a neutral date name that is already taken (never a number: names are never numbered). */
         internal fun continuedSuffixes(language: Language): List<String> =
             if (RecallMarkers.isChinese(language)) listOf("（续）", "（再续）") else listOf(" (cont.)", " (cont. again)")
@@ -1117,6 +1152,9 @@ class PeriodFormer(
               fixed. When the first new scenes carry it on, your first period continues it
               ("continues_current": true) and covers only those new scenes; you may keep its name or give one that
               fits the whole stretch better. When the new scenes turn away from it, start a new period instead.
+            - The current period is not one of the new scenes and has no number: "first" and "last" count the
+              new scenes only, from [1]. With one new scene, carrying the current period on is
+              {"continues_current": true, "last": 1}; turning away from it is {"first": 1, "last": 1}.
             Untrusted scenes:
             - A scene shown as "$UNTRUSTED_MARK" is shown by its dates only. Place it by its dates and its
               neighbours; never guess what happened in it and never name a period after it.
