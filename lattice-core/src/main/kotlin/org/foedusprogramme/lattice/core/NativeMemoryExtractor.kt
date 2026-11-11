@@ -344,7 +344,8 @@ class NativeMemoryExtractor(
             return base + "\n" + """
             TEMPORAL LAYER rules:
             - If a memory corresponds to an event with a definite date, put that date in the structured
-              `event_date` field (format YYYY-MM-DD, or YYYY-MM when only the month is known); do NOT
+              `event_date` field (format YYYY-MM-DD, YYYY-MM when only the month is known, or YYYY when only
+              the year is known: "last year", "about a year ago", "back in 2019"); do NOT
               write the date into the `content` sentence — `content` must stay date-free.
             - `event_date` is when the event ACTUALLY happened, not when it was recorded/discussed.
             - If a "Reference time: today is …" line is provided, use it to resolve now-relative
@@ -376,7 +377,7 @@ class NativeMemoryExtractor(
                 ExtractedMemory(
                     ref = ref,
                     content = content,
-                    // The structured event date, validated to ISO YYYY-MM(-DD). A non-conforming or absent value
+                    // The structured event date, validated to ISO YYYY(-MM(-DD)). A non-conforming or absent value
                     // is dropped to null (never fabricated or stamped into content). A non-STRING JSON value must
                     // NOT throw — `.jsonPrimitive` raises on a non-primitive and would bypass poison-window
                     // classification; `as?` yields null instead (treated as no date).
@@ -485,14 +486,16 @@ class NativeMemoryExtractor(
             return out.toString()
         }
 
-        /** ISO event-date normalizer/validator: accepts YYYY-MM or YYYY-MM-DD (zero-padding the month/
-         *  day), rejects anything else (a bare year, prose, an out-of-range month/day) to null so a
-         *  malformed or hallucinated date never enters the structured attribute. */
-        private val EVENT_DATE_RX = Regex("""^\s*(\d{4})-(\d{1,2})(?:-(\d{1,2}))?\s*$""")
+        /** ISO event-date normalizer/validator: accepts YYYY, YYYY-MM or YYYY-MM-DD (zero-padding the month/
+         *  day), rejects anything else (prose, an out-of-range month/day) to null so a malformed or
+         *  hallucinated date never enters the structured attribute. A bare year is a year-precise date ("last
+         *  year"): without it such a fact lost its date altogether. */
+        private val EVENT_DATE_RX = Regex("""^\s*(\d{4})(?:-(\d{1,2})(?:-(\d{1,2}))?)?\s*$""")
 
         internal fun normalizeEventDate(raw: String?): String? {
             val m = EVENT_DATE_RX.find(raw?.trim().orEmpty()) ?: return null
             val year = m.groupValues[1]
+            if (m.groupValues[2].isEmpty()) return year
             val month = m.groupValues[2].toIntOrNull()?.takeIf { it in 1..12 } ?: return null
             val day = m.groupValues[3].toIntOrNull()
             // Validate the ACTUAL calendar date, not just day in 1..31: reject Feb 30, Apr 31, Feb 29 on a
@@ -516,7 +519,7 @@ data class ExtractedMemory(
     val content: String,
     val salience: Double,
     val layer: Engram.Layer,
-    /** Temporal layer: the resolved event date (ISO YYYY-MM(-DD)); null = undated. Never written into content. */
+    /** Temporal layer: the resolved event date (ISO YYYY, YYYY-MM or YYYY-MM-DD); null = undated. Never written into content. */
     val eventDate: String? = null,
     /** Temporal layer: the target date of a plan / goal / deadline (ISO YYYY-MM(-DD)); null = none. */
     val dueDate: String? = null,

@@ -57,10 +57,27 @@ class NativeMemoryIngestorTest {
         assertEquals("2023-06" to null, NativeMemoryIngestor.splitFutureEventDate("2023-06", null, said, utc))
         assertEquals(null to "2024-01-31", NativeMemoryIngestor.splitFutureEventDate("2023-12-31", "2024-01-31", said, utc))
         assertEquals("2023-12-31" to null, NativeMemoryIngestor.splitFutureEventDate("2023-12-31", null, null, utc))
+        // A year-only date is compared at year precision: this year is not the future, next year is.
+        assertEquals("2023" to null, NativeMemoryIngestor.splitFutureEventDate("2023", null, said, utc))
+        assertEquals("2022" to null, NativeMemoryIngestor.splitFutureEventDate("2022", null, said, utc))
+        assertEquals(null to "2024", NativeMemoryIngestor.splitFutureEventDate("2024", null, said, utc))
         // The said day is read in the zone: 2023-06-16T22:00Z is already the 17th in Shanghai.
         val late = Instant.parse("2023-06-16T22:00:00Z")
         assertEquals("2023-06-17" to null, NativeMemoryIngestor.splitFutureEventDate("2023-06-17", null, late, java.time.ZoneId.of("Asia/Shanghai")))
         assertEquals(null to "2023-06-17", NativeMemoryIngestor.splitFutureEventDate("2023-06-17", null, late, utc))
+    }
+
+    @Test
+    fun aYearOnlyDateIsStoredAndIsNoMonth() {
+        val g = graph(LatticeGraph.Config(temporalLayer = true))
+        val said = Instant.parse("2023-06-16T10:00:00Z")
+        val ids = NativeMemoryIngestor.ingest(
+            g, Extraction(listOf(memory("m1", "John helped renovate his hometown community center", eventDate = "2022")), emptyList()),
+            saidFrom = said, saidTo = said,
+        )
+        val e = g.engram(ids.getValue("m1"))!!
+        assertEquals("2022", e.eventDate)
+        assertEquals(null, e.eventYearMonth, "no month to match a period window or a rerank on")
     }
 
     @Test

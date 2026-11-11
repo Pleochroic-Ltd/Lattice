@@ -200,7 +200,9 @@ class NativeMemoryExtractorTest {
     fun `normalizeEventDate unit table`() {
         assertEquals("2025-03-22", NativeMemoryExtractor.normalizeEventDate("2025-03-22"))
         assertEquals("2025-03", NativeMemoryExtractor.normalizeEventDate(" 2025-3 "))
-        assertNull(NativeMemoryExtractor.normalizeEventDate("2025"))
+        assertEquals("2025", NativeMemoryExtractor.normalizeEventDate(" 2025 "), "a year-precise date (\"last year\")")
+        assertNull(NativeMemoryExtractor.normalizeEventDate("25"))
+        assertNull(NativeMemoryExtractor.normalizeEventDate("2025-"))
         assertNull(NativeMemoryExtractor.normalizeEventDate("2025/03/22"))
         assertNull(NativeMemoryExtractor.normalizeEventDate(null))
         assertNull(NativeMemoryExtractor.normalizeEventDate("March 2025"))
@@ -210,6 +212,17 @@ class NativeMemoryExtractorTest {
         assertEquals("2024-02-29", NativeMemoryExtractor.normalizeEventDate("2024-02-29"))
         assertEquals("2025-01-31", NativeMemoryExtractor.normalizeEventDate("2025-1-31"))
         assertEquals("2025-02", NativeMemoryExtractor.normalizeEventDate("2025-02"))
+    }
+
+    @Test
+    fun `a year-only event date is kept and the prompt offers it`() {
+        val raw = """{"memories":[
+            {"ref":"m1","content":"John helped renovate his hometown community center","event_date":"2022"},
+            {"ref":"m2","content":"Maria started volunteering at the homeless shelter","event_date":"2022-5"}],"relations":[]}"""
+        val m = NativeMemoryExtractor.parse(raw)!!.memories
+        assertEquals(listOf("2022", "2022-05"), m.map { it.eventDate })
+        val prompt = NativeMemoryExtractor.buildPrompt(null, temporalLayer = true)
+        assertTrue("or YYYY when only" in prompt && "the year is known" in prompt, prompt)
     }
 
     @Test

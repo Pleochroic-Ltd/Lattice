@@ -78,8 +78,8 @@ object NativeMemoryIngestor {
 
     /**
      * (event date, due date) after moving an event date that lies after [saidTo]'s day (a month-only one: after its
-     * month) into the due date — unless a due date was already given, in which case the impossible event date is
-     * dropped. No [saidTo] = no check.
+     * month; a year-only one: after its year) into the due date — unless a due date was already given, in which case
+     * the impossible event date is dropped. No [saidTo] = no check.
      */
     internal fun splitFutureEventDate(eventDate: String?, dueDate: String?, saidTo: Instant?, zone: ZoneId): Pair<String?, String?> {
         if (eventDate == null || saidTo == null) return eventDate to dueDate
@@ -87,7 +87,9 @@ object NativeMemoryIngestor {
         val future = if (eventDate.length >= 10) {
             runCatching { LocalDate.parse(eventDate.take(10)) }.getOrNull()?.isAfter(said) == true
         } else {
-            eventDate.take(7) > said.toString().take(7)
+            // Compared at the date's own precision: "2023" said in 2023-05 is this year, not the future.
+            val precision = if (eventDate.length >= 7) 7 else 4
+            eventDate.take(precision) > said.toString().take(precision)
         }
         return if (future) null to (dueDate ?: eventDate) else eventDate to dueDate
     }

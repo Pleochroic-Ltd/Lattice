@@ -69,7 +69,7 @@ data class Engram(
     var salienceDecayedAt: Instant = createdAt,
     /**
      * Structured event-date attribute (TEMPORAL LAYER): WHEN the event this memory records actually
-     * happened, as an ISO `YYYY-MM` or `YYYY-MM-DD` string — distinct from [createdAt] (when the memory
+     * happened, as an ISO `YYYY`, `YYYY-MM` or `YYYY-MM-DD` string — distinct from [createdAt] (when the memory
      * was STORED). null = undated. Written by extraction (a resolved absolute date, incl. relatives
      * resolved against a trusted reference-time) so ordering/adjacency is derivable from a first-class
      * field instead of being baked into embedded [content] (which perturbs the embedding). Only ever
@@ -129,12 +129,12 @@ data class Engram(
     }
 
     /**
-     * The month component of [eventDate] as an ISO `YYYY-MM` string (null when undated). The sole time
+     * The month component of [eventDate] as an ISO `YYYY-MM` string (null when undated or dated to a year only). The sole time
      * key the retrieval-side temporal channel matches on — period-window membership and rerank
      * month-distance both read this, never the embedding. Day granularity is intentionally dropped:
      * the channel operates at month resolution.
      */
-    val eventYearMonth: String? get() = eventDate?.take(7)
+    val eventYearMonth: String? get() = eventDate?.takeIf { it.length >= 7 }?.take(7)
 
     /** Widen the said span to cover [from]..[to] (either may be null; both null changes nothing). */
     fun widenSaid(from: Instant?, to: Instant?) {

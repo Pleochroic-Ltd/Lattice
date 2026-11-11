@@ -3768,7 +3768,7 @@ class LatticeGraph(
         }
 
         /**
-         * TEMPORAL LAYER anti-fold comparison of two structured event-dates (ISO YYYY-MM or YYYY-MM-DD):
+         * TEMPORAL LAYER anti-fold comparison of two structured event-dates (ISO YYYY, YYYY-MM or YYYY-MM-DD):
          * true when they denote DIFFERENT events at their COARSEST-COMMON granularity. "2026-05" vs
          * "2026-05-15" compare on YYYY-MM (7 chars) -> equal -> NOT distinct (fold, the day just refines
          * the month); "2025-03" vs "2025-06" and "2025-03-10" vs "2025-03-20" differ -> distinct (block
