@@ -56,6 +56,13 @@ object RecallFormatter {
          */
         fun closedResolvesOf(setupId: Long): List<Long> = emptyList()
 
+        /**
+         * The live memory [id], or null. Read only for the dates of a set-up's RESOLVE memories
+         * ([closedResolvesOf]) when the block's tags are labelled ([RecallDating.labels]). Lattice:
+         * `LatticeGraph.engram(id)`.
+         */
+        fun engram(id: Long): Engram? = null
+
         /** The scenes memory [id] is a member of. */
         fun scenesOf(id: Long): Collection<SceneRecord> = emptyList()
 
@@ -100,6 +107,8 @@ object RecallFormatter {
     ): String {
         if (hits.isEmpty()) return ""
         val user = userLabel?.takeIf { it.isNotBlank() } ?: markers.quoteUser
+        // Labelled tags need the temporal layer, like every date tag: a rollback renders none, and no legend for them.
+        val labelled = dating.labels && temporalLayer
         val periodChat = dating.turnEnd?.chatKey
         val periodLabels = HashMap<Long, String?>()
         var sawScene = false
@@ -108,7 +117,7 @@ object RecallFormatter {
         var sawDates = false
         val body = ordered(hits, lookup).joinToString("\n") { hit ->
             val scene = if (hit.engram.isEpisodeHub) lookup.sceneOfHub(hit.engram.id) else null
-            val lead = lead(hit, scene, temporalLayer, dating, markers)
+            val lead = lead(hit, scene, temporalLayer, dating, markers, lookup)
             val annotation = annotation(hit, lookup, markers)
             // Appended only: the tag never changes which hits show, their order or anything recall learned.
             val period = if (periodChat == null) "" else periodTag(hit, scene, lookup, periodChat, markers, periodLabels)
@@ -118,11 +127,16 @@ object RecallFormatter {
             if (scene == null && temporalLayer && dating.dayPrecision && (hit.engram.saidFrom != null || hit.engram.dueDate != null)) {
                 sawDates = true
             }
+            // Labelled, every date says what it is the date of, so the legend explains a scene's or an event's too.
+            if (labelled && (if (scene != null) scene.dateFrom != null || scene.dateTo != null else hit.engram.eventDate != null)) {
+                sawDates = true
+            }
             val gist = "$lead${hit.engram.content.trim()}$annotation$period"
             val quotes = lookup.evidenceQuotes(hit.engram.id)
             if (quotes.isEmpty()) {
                 gist
             } else {
+                val shownSaid = if (scene == null) saidDays(hit.engram, dating.saidZone(), temporalLayer) else null
                 gist + quotes.joinToString("") { q ->
                     val who = when (q.speaker) {
                         // A named person's quote (a chat that names its speakers) carries their name.
@@ -130,7 +144,9 @@ object RecallFormatter {
                         Speaker.ASSISTANT -> markers.quoteSelf
                         null -> null
                     }
-                    "\n    " + markers.quote(q.content.trim(), who)
+                    val said = if (labelled) quoteSaid(q, shownSaid, temporalLayer, dating, markers) else ""
+                    if (said.isNotEmpty()) sawDates = true
+                    "\n    " + markers.quote(q.content.trim(), who) + said
                 }
             }
         }
@@ -138,10 +154,14 @@ object RecallFormatter {
         // without scenes, threads, periods or said / due tags is unchanged). It lives inside the recall block rather
         // than a static system prompt so a cached prompt prefix never changes, and it is in the turn's language, like
         // the markers it explains. The block never holds a blank line: the tags are single-line.
-        val legend = markers.legend(sawScene, sawThread, sawPeriod, sawDates) ?: return body
+        val legend = markers.legend(sawScene, sawThread, sawPeriod, sawDates, labelled) ?: return body
         // In words, a said date also says what a relative time inside the memory counts from: a reader took
         // "three days ago" from today, or from the event date, and counted it twice.
-        val relative = if (sawDates && dating.inWords) markers.legendRelativeSuffix else ""
+        val relative = when {
+            !sawDates || !dating.inWords -> ""
+            labelled -> markers.legendRelativeLabelledSuffix
+            else -> markers.legendRelativeSuffix
+        }
         return "$body\n$legend$relative"
     }
 
@@ -153,13 +173,21 @@ object RecallFormatter {
      *    a discrete fact;
      *  - anything else: the temporal-layer date tag, if any.
      */
-    private fun lead(hit: Activation, scene: SceneRecord?, temporalLayer: Boolean, dating: RecallDating, markers: RecallMarkers): String {
+    private fun lead(
+        hit: Activation,
+        scene: SceneRecord?,
+        temporalLayer: Boolean,
+        dating: RecallDating,
+        markers: RecallMarkers,
+        lookup: Lookup,
+    ): String {
         if (scene != null) {
             val from = scene.dateFrom?.let { if (dating.inWords) markers.isoInWords(it) else it }
             val to = scene.dateTo?.let { if (dating.inWords) markers.isoInWords(it) else it }
-            return "- ${markers.sceneTag(scene.title, from, to, scene.inProgress)}"
+            return "- ${markers.sceneTag(scene.title, from, to, scene.inProgress, labelled = dating.labels && temporalLayer)}"
         }
         val prefix = if (hit.engram.isEpisode) "- ${markers.episode}" else "- "
+        if (dating.labels && temporalLayer) return "$prefix${labelledPrefix(hit.engram, dating, markers, lookup)}"
         return "$prefix${datePrefix(hit, temporalLayer, dating, markers)}"
     }
 
@@ -223,6 +251,75 @@ object RecallFormatter {
         }
         return if (parts.isEmpty()) "" else "[${parts.joinToString(" · ")}] "
     }
+
+    /**
+     * The labelled date tag ([RecallDating.labels]): every date says what it is the date of, so a bare or partial
+     * event date can't be read past for the exact said date beside it, and a plan isn't read as done on the day it was
+     * made. `[happened: <event> · due: <target> · resolved: <outcome> · mentioned: <first>..<latest>] `, each part only
+     * when known; a year- or month-only event date is marked partial; the mention comes last, being the date a reader
+     * most often answered with by mistake. On the turn-end recall the relative time follows the date it counts from:
+     * the event day when the memory has one, else the latest mention.
+     */
+    private fun labelledPrefix(e: Engram, dating: RecallDating, markers: RecallMarkers, lookup: Lookup): String {
+        val parts = ArrayList<String>(5)
+        val turnEnd = dating.turnEnd
+        fun relative(day: LocalDate): String? =
+            turnEnd?.let { markers.relativeTime(ChronoUnit.DAYS.between(day, LocalDate.ofInstant(it.now, it.zone))) }
+        val eventDay = e.eventDate?.let(::fullDay)
+        e.eventDate?.let { parts += markers.happened(markers.partial(it, shownDate(it, dating, markers))) }
+        eventDay?.let { day -> relative(day)?.let { parts += it } }
+        e.dueDate?.let { parts += markers.dueLabelled(shownDate(it, dating, markers)) }
+        outcome(e, dating, markers, lookup)?.let { parts += it }
+        val said = saidDays(e, dating.saidZone(), enabled = true)
+        if (said != null) {
+            val (from, to) = said
+            parts += if (dating.inWords) markers.mentioned(markers.saidDay(from), markers.saidDay(to)) else markers.mentioned(from.toString(), to.toString())
+            if (eventDay == null) relative(to)?.let { parts += it }
+        }
+        return if (parts.isEmpty()) "" else "[${parts.joinToString(" · ")}] "
+    }
+
+    /**
+     * When a set-up of a closed thread was settled, from its RESOLVE memories in thread order: the first one's event
+     * date (`resolved: 25 February 2023`), else, when none has one, the first one's mention (`resolved: by Sat 25
+     * February 2023`: it was settled by the day it was reported). Null for a memory that settled nothing, or whose
+     * resolves carry no date.
+     */
+    private fun outcome(e: Engram, dating: RecallDating, markers: RecallMarkers, lookup: Lookup): String? {
+        if (e.isEpisodeHub) return null
+        val resolves = lookup.closedResolvesOf(e.id).mapNotNull(lookup::engram)
+        resolves.firstNotNullOfOrNull { it.eventDate }?.let { return markers.resolved(markers.partial(it, shownDate(it, dating, markers))) }
+        val reported = resolves.firstNotNullOfOrNull { saidDays(it, dating.saidZone(), enabled = true) }?.first ?: return null
+        return markers.resolvedBy(if (dating.inWords) markers.saidDay(reported) else reported.toString())
+    }
+
+    /**
+     * What follows a quote under a labelled hit: the day the words were said, when the line above doesn't already show
+     * exactly that one day (it shows a span of several days, another day, or none, as a scene line does). A relative
+     * time in the quote ("yesterday") then has its day next to it.
+     */
+    private fun quoteSaid(q: Engram, shown: Pair<LocalDate, LocalDate>?, temporalLayer: Boolean, dating: RecallDating, markers: RecallMarkers): String {
+        val (from, to) = saidDays(q, dating.saidZone(), temporalLayer) ?: return ""
+        if (shown != null && shown.first == shown.second && from == to && from == shown.first) return ""
+        return if (dating.inWords) markers.quoteSaid(markers.saidDay(from), markers.saidDay(to)) else markers.quoteSaid(from.toString(), to.toString())
+    }
+
+    /** [e]'s said span as calendar days in [zone] (first, latest), or null when unknown or [enabled] is off. */
+    private fun saidDays(e: Engram, zone: ZoneId, enabled: Boolean): Pair<LocalDate, LocalDate>? {
+        if (!enabled) return null
+        val from = e.saidFrom?.let { LocalDate.ofInstant(it, zone) } ?: return null
+        val to = (e.saidTo ?: e.saidFrom)?.let { LocalDate.ofInstant(it, zone) } ?: return null
+        return from to to
+    }
+
+    /** An ISO date as a tag shows it: in words, else a day as it is and anything else cut to its month or year. */
+    private fun shownDate(iso: String, dating: RecallDating, markers: RecallMarkers): String {
+        val day = fullDay(iso)
+        if (!dating.inWords) return day?.toString() ?: iso.take(7)
+        return day?.let(markers::day) ?: markers.isoInWords(iso.take(7))
+    }
+
+    private fun RecallDating.saidZone(): ZoneId = turnEnd?.zone ?: zone
 
     private val ISO_DAY = Regex("\\d{4}-\\d{2}-\\d{2}")
 
@@ -329,10 +426,18 @@ data class RecallDating(
      * relative time inside a memory counts from. With day precision only.
      */
     val inWords: Boolean = false,
+    /**
+     * Every date in a tag says what it is the date of: `happened:` (a year- or month-only one marked partial),
+     * `mentioned:`, `due:`, `resolved:` (a settled plan's outcome date), a quote's own `said:` day, and a scene's
+     * dates as `mentioned:`; the dates legend explains them. Off = the unlabelled tags, byte for byte. With day
+     * precision only.
+     */
+    val labels: Boolean = false,
 ) {
     init {
         require(turnEnd == null || dayPrecision) { "a turn-end recall shows the day" }
         require(!inWords || dayPrecision) { "dates in words come with day precision" }
+        require(!labels || dayPrecision) { "labelled dates come with day precision" }
     }
 
     /** The render-time context of a turn-end recall: the turn's chat, the clock and the runtime zone. */
@@ -342,10 +447,11 @@ data class RecallDating(
         val LEGACY = RecallDating()
         val ABSOLUTE = RecallDating(dayPrecision = true)
 
-        /** [ABSOLUTE] reading said spans in [zone] (the runtime zone), dates [inWords] or ISO. */
-        fun absolute(zone: ZoneId, inWords: Boolean = false) = RecallDating(dayPrecision = true, zone = zone, inWords = inWords)
+        /** [ABSOLUTE] reading said spans in [zone] (the runtime zone), dates [inWords] or ISO, [labels] or not. */
+        fun absolute(zone: ZoneId, inWords: Boolean = false, labels: Boolean = false) =
+            RecallDating(dayPrecision = true, zone = zone, inWords = inWords, labels = labels)
 
-        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId, inWords: Boolean = false) =
-            RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone), inWords = inWords)
+        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId, inWords: Boolean = false, labels: Boolean = false) =
+            RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone), inWords = inWords, labels = labels)
     }
 }

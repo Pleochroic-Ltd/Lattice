@@ -357,8 +357,8 @@ internal class DefaultLattice(
         // that turn alone, so it also shows how long ago and the period.
         val dating = when {
             !sceneEpisodes -> RecallDating.LEGACY
-            explicit -> RecallDating.absolute(zone, settings.recallDatesInWords)
-            else -> RecallDating.turnEnd(options.chatKey, now(), zone, settings.recallDatesInWords)
+            explicit -> RecallDating.absolute(zone, settings.recallDatesInWords, settings.recallDateLabels)
+            else -> RecallDating.turnEnd(options.chatKey, now(), zone, settings.recallDatesInWords, settings.recallDateLabels)
         }
         onGraphBounded { g ->
             val hits = dispatchTemporal(g, cue, options.limit ?: if (explicit) settings.searchLimit else settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)
@@ -463,6 +463,7 @@ internal class DefaultLattice(
         override fun sceneOfHub(hubId: Long) = g.sceneOfHub(hubId)
         override fun threadsOf(id: Long) = g.threadStatusOf(id).let { RecallFormatter.Threads(it.closed, it.open) }
         override fun closedResolvesOf(setupId: Long) = g.closedResolvesOf(setupId)
+        override fun engram(id: Long) = g.engram(id)
         override fun scenesOf(id: Long) = g.scenesOf(id).mapNotNull(g::scene)
         override fun periodOfScene(sceneId: Long) = g.periodOfScene(sceneId)
         override fun periodLabel(period: PeriodRecord) = periodLabels.label(g, period, language)
@@ -1187,7 +1188,7 @@ internal class DefaultLattice(
             )
             val legends = linkedSetOf(language, Language.EN, Language.ZH).flatMap { lang ->
                 val m = RecallMarkers.of(texts, lang)
-                listOf(m.legendScene, m.legendThread, m.legendSceneAndThread, m.legendPeriod, m.legendDates)
+                listOf(m.legendScene, m.legendThread, m.legendSceneAndThread, m.legendPeriod, m.legendDates, m.legendDatesLabelled)
             }
             return (transcript + legends).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         }

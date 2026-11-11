@@ -38,6 +38,15 @@ data class LatticeSettings(
      * dates.
      */
     val recallDatesInWords: Boolean = true,
+    /**
+     * With scene episodes on, every date in a recall tag says what it is the date of: `happened:` for when the event
+     * took place (a year- or month-only one marked "(year only)" / "(month only)"), `mentioned:` for when it came up in
+     * the conversation (a scene's dates too), `due:` for a plan's target, `resolved:` for when a plan or open question
+     * was later settled, and a quote's own `said:` day when the line above doesn't show it; the dates legend explains
+     * them. Only the rendering changes: what is stored and which memories are recalled are the same. false = the
+     * unlabelled tags (`[2021 · said Wed 20 April 2022]`), byte for byte.
+     */
+    val recallDateLabels: Boolean = true,
     val graphReadTimeout: Duration = 15.seconds,
     val shutdownTimeout: Duration = 30.seconds,
     /** Most model-judged pairs a sleep reviews. */

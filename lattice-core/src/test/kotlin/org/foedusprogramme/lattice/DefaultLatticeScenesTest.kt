@@ -57,8 +57,9 @@ class DefaultLatticeScenesTest {
         model: MemoryModel? = this.model,
         temporalLayer: Boolean = true,
         formPeriods: SleepPass? = null,
+        settings: (LatticeSettings) -> LatticeSettings = { it },
     ): DefaultLattice = LatticeTestKit.open(
-        settings = LatticeTestKit.settings().copy(scenes = scenes, temporalLayer = temporalLayer),
+        settings = settings(LatticeTestKit.settings().copy(scenes = scenes, temporalLayer = temporalLayer)),
         model = model,
         conversations = conversations,
         graphConfig = LatticeGraph.Config(dedupThreshold = 1.01, autoLinkThreshold = 0.99, temporalLayer = temporalLayer),
@@ -162,10 +163,16 @@ class DefaultLatticeScenesTest {
         lattice.scenes!!.awaitIdle()
 
         val explicit = lattice.recall("kyoto", RecallOptions(explicit = true, chatKey = CHAT)).text
-        assertTrue("said Thu 30 July 2026" in explicit, explicit)
-        assertTrue(explicit.trimEnd().endsWith(RecallMarkers.EN.legendRelativeSuffix), "the legend says what a relative time counts from")
+        assertTrue("mentioned: Thu 30 July 2026" in explicit, explicit)
+        assertTrue(explicit.trimEnd().endsWith(RecallMarkers.EN.legendRelativeLabelledSuffix), "the legend says what a relative time counts from")
         val perTurn = lattice.recall("kyoto", RecallOptions(chatKey = CHAT)).text
-        assertTrue(perTurn.isEmpty() || "said Thu 30 July 2026 · " in perTurn, "a per-turn block also says how long ago: $perTurn")
+        assertTrue(perTurn.isEmpty() || "mentioned: Thu 30 July 2026 · " in perTurn, "a per-turn block also says how long ago: $perTurn")
+
+        val unlabelled = open(scenes = sceneSettings.copy(sceneEpisodes = true), settings = { it.copy(recallDateLabels = false) })
+        unlabelled.withGraph { g -> g.remember("The user talked about kyoto", saidFrom = Instant.parse("2026-07-30T09:00:00Z")); Unit }
+        val plain = unlabelled.recall("kyoto", RecallOptions(explicit = true)).text
+        assertTrue("[said Thu 30 July 2026] " in plain && "mentioned" !in plain, plain)
+        assertTrue(plain.trimEnd().endsWith(RecallMarkers.EN.legendRelativeSuffix), plain)
 
         val legacy = open(scenes = sceneSettings.copy(sceneEpisodes = false))
         legacy.withGraph { g -> g.remember("The user talked about kyoto", saidFrom = Instant.parse("2026-07-30T09:00:00Z")); Unit }

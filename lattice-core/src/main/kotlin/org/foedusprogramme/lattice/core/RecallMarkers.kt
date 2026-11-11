@@ -53,14 +53,17 @@ class RecallMarkers private constructor(
     /**
      * A scene hub's lead: `〔场景：标题 · 起止日期〕` (zh) / `[Scene: title · dates] ` (en); the head alone when the
      * title is blank, one date for a single-day scene, the in-progress note inside the bracket while the scene is
-     * open. The date range format (`from～to`) is the same in every language.
+     * open. The date range format (`from～to`) is the same in every language. [labelled] ([RecallDating.labels]) says
+     * what the dates are: when the scene was talked through (`[Scene: title · mentioned: 27 June 2023] `), which is
+     * not when what it tells happened.
      */
-    fun sceneTag(title: String, dateFrom: String?, dateTo: String?, inProgress: Boolean): String {
-        val dates = when {
+    fun sceneTag(title: String, dateFrom: String?, dateTo: String?, inProgress: Boolean, labelled: Boolean = false): String {
+        val range = when {
             dateFrom == null -> dateTo
             dateTo == null || dateTo == dateFrom -> dateFrom
             else -> "$dateFrom～$dateTo"
         }
+        val dates = if (labelled && range != null) fill("lattice.recall.date.mentioned", "span" to range) else range
         val t = title.trim()
         val head = if (t.isEmpty()) sceneUntitled else fill("lattice.recall.scene.titled", "title" to t)
         val body = listOfNotNull(head, dates).joinToString(" · ")
@@ -96,6 +99,48 @@ class RecallMarkers private constructor(
 
     /** A plan's / goal's target date. */
     fun due(date: String): String = fill("lattice.recall.date.due", "date" to date)
+
+    // --- Labelled dates ([RecallDating.labels]): every date in a tag says what it is the date of. -------------------
+
+    /** When the event itself happened: `happened: 2021 (year only)`. [date] is as shown, with [partial] applied. */
+    fun happened(date: String): String = fill("lattice.recall.date.happened", "date" to date)
+
+    /** When a memory came up in the conversation: `mentioned: Wed 20 April 2022` (one day, or first..latest). */
+    fun mentioned(from: String, to: String): String =
+        fill("lattice.recall.date.mentioned", "span" to if (from == to) from else from + spanSeparator + to)
+
+    /** A plan's / deadline's target date, labelled: `due: 28 February 2023`. */
+    fun dueLabelled(date: String): String = fill("lattice.recall.date.due_labelled", "date" to date)
+
+    /** When a plan or open question was settled: `resolved: 25 February 2023`. */
+    fun resolved(date: String): String = fill("lattice.recall.date.resolved", "date" to date)
+
+    /** A settlement dated only by when it was reported: `resolved: by Sat 25 February 2023`. */
+    fun resolvedBy(date: String): String = fill("lattice.recall.date.resolved_by", "date" to date)
+
+    /** What follows a quote whose own day is not the one its memory shows: ` (said: Mon 28 August 2023)`. */
+    fun quoteSaid(from: String, to: String): String =
+        fill("lattice.recall.date.quote_said", "span" to if (from == to) from else from + spanSeparator + to)
+
+    /**
+     * [shown] marked as partial when [iso] is a year (`2021 (year only)`) or a month (`May 2023 (month only)`);
+     * a complete day is returned as it is.
+     */
+    fun partial(iso: String, shown: String): String {
+        val s = iso.trim()
+        return when {
+            ISO_YEAR.matches(s) -> fill("lattice.recall.date.year_only", "date" to shown)
+            ISO_DAY.matches(s) && runCatching { LocalDate.parse(s) }.isSuccess -> shown
+            else -> fill("lattice.recall.date.month_only", "date" to shown)
+        }
+    }
+
+    /** The dates legend of a block whose tags are labelled: alone, or appended to another legend on the same line. */
+    val legendDatesLabelled: String by lazy { string("lattice.recall.legend.dates_labelled") }
+    val legendDatesLabelledSuffix: String by lazy { string("lattice.recall.legend.dates_labelled_suffix") }
+
+    /** [legendRelativeSuffix] for labelled tags: a relative time counts from the day mentioned, in a quote the day said. */
+    val legendRelativeLabelledSuffix: String by lazy { string("lattice.recall.legend.relative_labelled_suffix") }
 
     private val monthNames: List<String> by lazy { string("lattice.recall.date.months").split(',').map { it.trim() } }
     private val weekdayNames: List<String> by lazy { string("lattice.recall.date.weekdays").split(',').map { it.trim() } }
@@ -184,13 +229,16 @@ class RecallMarkers private constructor(
         }
     }
 
-    /** [legend] plus, when the block shows said / due tags, their explanation on the same line. */
-    fun legend(scene: Boolean, thread: Boolean, period: Boolean, dates: Boolean): String? {
+    /**
+     * [legend] plus, when the block shows said / due tags, their explanation on the same line; [labelled] explains the
+     * labelled tags ([RecallDating.labels]) instead.
+     */
+    fun legend(scene: Boolean, thread: Boolean, period: Boolean, dates: Boolean, labelled: Boolean = false): String? {
         val base = legend(scene, thread, period)
         return when {
             !dates -> base
-            base == null -> legendDates
-            else -> base + legendDatesSuffix
+            base == null -> if (labelled) legendDatesLabelled else legendDates
+            else -> base + if (labelled) legendDatesLabelledSuffix else legendDatesSuffix
         }
     }
 
