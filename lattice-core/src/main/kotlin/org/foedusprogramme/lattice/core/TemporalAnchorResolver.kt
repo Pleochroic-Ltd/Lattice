@@ -11,7 +11,8 @@ import java.time.ZoneId
  * dispatcher falls through to plain semantic recall — the always-safe default).
  *
  * Precedence:
- *  1. ABSOLUTE  `YYYY-MM` / `YYYY/MM` / `YYYY年M(月)`      -> POINT / HIGH
+ *  1. ABSOLUTE  `YYYY-MM` / `YYYY/MM` / `YYYY年M(月)`, and an English month name with its year ("May 2023",
+ *               "May 3, 2023", "4th October, 2023", "2023 May") -> POINT / HIGH
  *  2. RELATIVE  N周前 / N天前 / 上周 / 这周 / 昨天 / 前天 / 前几天 / N weeks ago / N days ago / last week / this week /
  *               yesterday / a few days ago -> POINT / HIGH with a DAY window (said or happened then);
  *               去年X月 / N个月前 / 上个月 / 这个月 / 去年 / last month / N months ago / last year / this month
@@ -68,6 +69,18 @@ object TemporalAnchorResolver {
     private val EN_MONTH_RX = Regex("\\b($EN_MONTHS)\\b", RegexOption.IGNORE_CASE)
 
     /**
+     * An English month name that names its year: "May 2023", "May 3, 2023", "May 3rd 2023" (groups 1, 2), "3 May
+     * 2023", "4th October, 2023", "the 3rd of May 2023" (3, 4), "2023 May" (5, 6). The year is the cue's own, never
+     * the most recent occurrence of the month.
+     */
+    private val EN_MONTH_YEAR_RX = Regex(
+        "\\b($EN_MONTHS)\\.?\\s+(?:\\d{1,2}(?:st|nd|rd|th)?,?\\s+)?(\\d{4})\\b" +
+            "|\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?($EN_MONTHS)\\.?,?\\s+(\\d{4})\\b" +
+            "|\\b(\\d{4})\\s+($EN_MONTHS)\\b",
+        RegexOption.IGNORE_CASE,
+    )
+
+    /**
      * A bare English month word anchors a POINT ONLY when it is NOT standalone. A common-word month —
      * "may" (modal), "march" (verb), "august" (adjective) — must be accompanied by a day, a year, or an
      * explicit temporal determiner/preposition ("in august", "the December", "March 3", "3 march",
@@ -110,6 +123,19 @@ object TemporalAnchorResolver {
             val y = m.groupValues[1].toInt()
             val mo = m.groupValues[2].toInt()
             if (mo in 1..12) return point(YearMonth.of(y, mo))
+        }
+        // A month name with its year: that year, whatever the clock says (the bare-month rule below would take the
+        // most recent occurrence, a year off for "May 2022" asked in August 2023).
+        EN_MONTH_YEAR_RX.find(c)?.let { m ->
+            val g = m.groupValues
+            val (name, year) = when {
+                g[1].isNotEmpty() -> g[1] to g[2]
+                g[3].isNotEmpty() -> g[3] to g[4]
+                else -> g[6] to g[5]
+            }
+            val mo = EN_MONTH[name.lowercase()]
+            val y = year.toIntOrNull()
+            if (mo != null && y != null) return point(YearMonth.of(y, mo))
         }
 
         // 2. RELATIVE (resolved against the query clock, in the user's zone). Days and weeks first: their window is

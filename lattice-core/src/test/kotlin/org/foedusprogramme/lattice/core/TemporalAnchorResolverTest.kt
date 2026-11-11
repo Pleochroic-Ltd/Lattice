@@ -5,6 +5,7 @@ import java.time.YearMonth
 import java.time.ZoneOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 /**
@@ -28,6 +29,29 @@ class TemporalAnchorResolverTest {
         assertEquals(TemporalAnchor.Confidence.HIGH, a.confidence)
         // CN 年/月 form resolves the same.
         assertEquals(YearMonth.of(2025, 3), r("2025年3月我们聊了什么")!!.yearMonth)
+    }
+
+    @Test
+    fun aMonthNameWithItsYearKeepsThatYear() {
+        // Asked in August 2026: the most recent May is 2026's, but the cue names 2023 / 2027.
+        for ((cue, expected) in listOf(
+            "Who did Maria have dinner with on May 3, 2023?" to YearMonth.of(2023, 5),
+            "What happened in May 2023?" to YearMonth.of(2023, 5),
+            "What did Audrey do the weekend before 4th October, 2023?" to YearMonth.of(2023, 10),
+            "the 3rd of December 2024" to YearMonth.of(2024, 12),
+            "Sept 2022 plans" to YearMonth.of(2022, 9),
+            "our 2027 March trip" to YearMonth.of(2027, 3),
+            "What is planned for October 2027?" to YearMonth.of(2027, 10),
+        )) {
+            val a = assertNotNull(r(cue), cue)
+            assertEquals(expected, a.yearMonth, cue)
+            assertEquals(TemporalAnchor.Kind.POINT, a.kind, cue)
+            assertNull(a.fromDay, cue)
+            assertEquals(TemporalIntent.RELEVANCE, TemporalIntentClassifier.classify(cue), "classify() and resolve() agree: $cue")
+        }
+        // Without a year the most recent occurrence still wins.
+        assertEquals(YearMonth.of(2026, 5), r("on May 3 we met")!!.yearMonth)
+        assertEquals(YearMonth.of(2025, 10), r("in October")!!.yearMonth)
     }
 
     @Test
