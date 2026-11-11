@@ -357,6 +357,16 @@ class LatticeGraph(
          * pruned stays gone.
          */
         val explicitSalienceExponent: Double = 1.0,
+        /**
+         * EXPLICIT search only: at most this many scene or episode HUBS (gist narrations) are cued directly, by their
+         * own cosine to the cue at or above [seedFloor], and appended after the reinstatement stage in reserved
+         * slots — a fact that lives only in a scene's narration (a photo caption, a detail no memory kept) can then
+         * be found from its cue, as a gist can be cued in complementary-learning-systems terms. They are seeds in
+         * name only: a hub stays absorb-only (it relays no activation, so a gist seed brings none of its members),
+         * never enters the base ranking and is never reinforced. 0 = legacy (a hub only by reinstatement
+         * from a seeded member).
+         */
+        val explicitGistSeeds: Int = 0,
         /** Rank multiplier applied to a memory that has been superseded by a newer one. */
         val supersededPenalty: Double = 0.25,
         /** Rank multiplier applied to an episode (whole-session summary) node, so a broad session
@@ -575,6 +585,8 @@ class LatticeGraph(
                 // at its 0.7 cap ranks 0.81 : 0.92 instead of 0.69 : 0.85, a gap the size of bge-m3's on-target
                 // vs related cosine margin (0.72-0.79 vs ~0.64) rather than one that outweighs it.
                 explicitSalienceExponent = 0.5,
+                // A deliberate search may cue up to two scene gists directly (absorb-only, never relayed).
+                explicitGistSeeds = 2,
                 // "Four weeks ago", "上周": the memories said (or dated) in that window, most relevant first.
                 dayWindowRecall = true,
                 // Enabled: only an explicit search breadth cue engages it (passive per-turn path
@@ -1170,8 +1182,9 @@ class LatticeGraph(
         val seedSlots = if (explicit) maxOf(config.seedCount, limit) else config.seedCount
 
         val seeds = nodes.values
-            // Verbatims are reached via EVIDENCE, never seeded directly. Episode / scene HUBS are never seeds
-            // either: a hub surfaces only through episode reinstatement from a SEED member.
+            // Verbatims are reached via EVIDENCE, never seeded directly. Episode / scene HUBS are never spreading
+            // seeds either: a hub surfaces through episode reinstatement from a SEED member, or (explicit search,
+            // [Config.explicitGistSeeds]) as a gist seed appended after the base, which spreads nothing.
             .filter { it.speaker == null && !it.isEpisodeHub }
             .map { node ->
                 val sim = cosine(node.embedding, cueVec)
@@ -1299,9 +1312,12 @@ class LatticeGraph(
         val reinstated = appendEpisodeReinstatement(
             closed, cue, limit, bestSeed, cueVec, activation, reach, sharedUsed = spread.size,
         )
+        // GIST SEEDS (explicit search only): scene / episode hubs cued directly by their narration, in reserved slots
+        // after reinstatement. Absorb-only: they were never put in the spreading frontier, so they relay nothing.
+        val gisted = if (explicit) appendGistSeeds(reinstated, cueVec) else reinstated
         // entity recall append (read-only tail; base = spread.take(limit) is untouched so learning below is
         // unaffected). Dark unless Config.entityRecall is ON.
-        val hits = appendEntityRecall(reinstated, cue, limit, applyEmitGate)
+        val hits = appendEntityRecall(gisted, cue, limit, applyEmitGate)
 
         // Reinforcement (Hebbian wiring + replay/promotion counting + salience keep-alive) runs over
         // the BASE ids ONLY — the first [limit] hits (append never touches those). Appended graph-only
@@ -1597,6 +1613,28 @@ class LatticeGraph(
         return appendEpisodeReinstatement(
             closed, cue, limit, hits.maxOf { it.activation }, cueVec, activation, emptyMap(), sharedUsed = hits.size,
         )
+    }
+
+    /**
+     * GIST SEEDS ([Config.explicitGistSeeds]): the hubs whose narration is closest to the cue, at or above
+     * [Config.seedFloor], at most [Config.explicitGistSeeds], appended after [emitted] unless already in it (a seeded
+     * member may have reinstated one). Each is a SEED in reach only: it spread nothing and brings no member, and the
+     * caller reinforces the base alone, so no hub is ever learned from. Returns [emitted] as it is when off or when no
+     * hub clears the floor.
+     */
+    private fun appendGistSeeds(emitted: List<Activation>, cueVec: FloatArray): List<Activation> {
+        val cap = config.explicitGistSeeds
+        if (cap <= 0) return emitted
+        val emittedIds = emitted.mapTo(HashSet()) { it.engram.id }
+        val gists = nodes.values.asSequence()
+            .filter { it.isEpisodeHub && it.speaker == null && it.id !in emittedIds }
+            .map { it to cosine(it.embedding, cueVec) }
+            .filter { it.second >= config.seedFloor && it.second > 0.0 }
+            .sortedByDescending { it.second }
+            .take(cap)
+            .map { (hub, sim) -> Activation(hub, sim, Activation.Reach.SEED) }
+            .toList()
+        return if (gists.isEmpty()) emitted else emitted + gists
     }
 
     /**
