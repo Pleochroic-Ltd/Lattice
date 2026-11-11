@@ -62,8 +62,9 @@ fun interface ExtractedChunk {
  *
  * Failures: a segmentation that fails counts an attempt on the cursor and leaves the messages for the catch-up (a live
  * step does not retry it); at [MAX_SEGMENT_ATTEMPTS] they fall back to plain chunks without a scene. A chunk that
- * fails counts an attempt on its scene and stops the scene's extraction there; at [MAX_CHUNK_ATTEMPTS] the chunk is
- * given up (the scene is incomplete) and the next one runs. A call the shutdown or an interrupt cut off counts nothing.
+ * fails counts an attempt on its scene and stops the scene's extraction there until the seal or the catch-up (a live
+ * step does not retry it, and a pass tries it once); at [MAX_CHUNK_ATTEMPTS] the chunk is given up (the scene is
+ * incomplete) and the next one runs. A call the shutdown or an interrupt cut off counts nothing.
  *
  * Threads: segmentation, extraction and all bookkeeping run on [captureExecutor], narration on [narrationExecutor];
  * both must run their tasks one at a time, in order. Every graph access goes through [graph]. The public calls return
@@ -226,9 +227,16 @@ class ScenePipeline(
 
     // --- one conversation ----------------------------------------------------------------------------------------
 
-    private class Pass(var messages: Int = 0)
+    /**
+     * One pass over the capture side: the messages it extracted, the scenes whose extraction failed in it (each
+     * counted one attempt, and not tried again in the same pass — the catch-up shares one set across its
+     * conversations), and whether it is a [Mode.LIVE] step, which leaves a scene stopped at a failed chunk to the seal or
+     * the catch-up. Without both rules every live step retried such a scene as it grew, so a short outage burnt all
+     * [MAX_CHUNK_ATTEMPTS] within one session and gave the chunk up — as many as the steps the host's timing allowed.
+     */
+    private class Pass(var messages: Int = 0, val failed: MutableSet<Long> = HashSet(), var live: Boolean = false)
 
-    private fun process(conversationId: String, requested: Mode): Int {
+    private fun process(conversationId: String, requested: Mode, failed: MutableSet<Long> = HashSet()): Int {
         val info = source.conversation(conversationId) ?: run {
             logger.info("Scene pipeline: the host has no conversation {}; nothing to segment", conversationId)
             return 0
@@ -238,7 +246,7 @@ class ScenePipeline(
         if (cursor.finished) return 0
         // A failed segmentation waits for the catch-up or the seal: retrying it at every turn would burn its attempts.
         if (mode == Mode.LIVE && (cursor.segmentAttempts > 0 || cursor.fallbackThrough != null)) return 0
-        val pass = Pass()
+        val pass = Pass(failed = failed, live = mode == Mode.LIVE)
         if (mode == Mode.SEALED) retryPendingScenes(conversationId, pass)
         val sealed = info.sealed || mode == Mode.SEALED
         var drained = false
@@ -474,10 +482,17 @@ class ScenePipeline(
             (work.extractedThrough ?: Long.MIN_VALUE) < scene.lastMessageId
 
     /**
-     * Extracts each of [sceneIds] in turn ([extractScene]) and hands it to narration once its extraction stops
-     * ([reevaluate]). With [extractParallelism] above 1 the model calls run [Ahead]; the outcome is the serial one.
+     * Extracts each of [all] in turn ([extractScene]) and hands it to narration once its extraction stops
+     * ([reevaluate]), except the scenes [pass] holds back. With [extractParallelism] above 1 the model calls run
+     * [Ahead]; the outcome is the serial one.
      */
-    private fun extractScenes(sceneIds: List<Long>, pass: Pass) {
+    private fun extractScenes(all: List<Long>, pass: Pass) {
+        // A scene that failed earlier in this pass, or (a live step) whose extraction stopped at a failed chunk, waits:
+        // its next attempt belongs to the seal or the catch-up (see [Pass]).
+        val waiting = graph.withGraph { g ->
+            all.filterTo(HashSet()) { id -> id in pass.failed || (pass.live && (g.sceneWork(id)?.extractAttempts ?: 0) > 0) }
+        }
+        val sceneIds = all.filter { it !in waiting }
         val executor = extractExecutor
         val ahead = if (executor != null && extractParallelism > 1 && sceneIds.isNotEmpty()) Ahead(sceneIds, extractParallelism, executor) else null
         try {
@@ -550,6 +565,7 @@ class ScenePipeline(
             ScenePlan.Done -> return
             is ScenePlan.Unread -> {
                 unreadRange(plan.scene, plan.start)
+                pass.failed += sceneId
                 return
             }
             is ScenePlan.Chunks -> Unit
@@ -584,6 +600,7 @@ class ScenePipeline(
                 logger.warn("Scene chunk given up after {} attempts scene={} messages={}..{}: {}", MAX_CHUNK_ATTEMPTS, sceneId, from, end, failure.message)
             } else {
                 logger.warn("Scene chunk failed scene={} messages={}..{}: {}", sceneId, from, end, failure.message)
+                pass.failed += sceneId
                 ahead?.stop()
                 return
             }
@@ -857,7 +874,7 @@ class ScenePipeline(
             .onFailure { logger.warn("Scene catch-up: retrying failed chunks failed: {}", it.message, it) }
         var messages = retried.messages
         for (conversationId in conversations) {
-            messages += runCatching { process(conversationId, Mode.CATCH_UP) }
+            messages += runCatching { process(conversationId, Mode.CATCH_UP, retried.failed) }
                 .onFailure { logger.warn("Scene catch-up of conversation={} failed: {}", conversationId, it.message, it) }
                 .getOrDefault(0)
         }

@@ -182,6 +182,38 @@ class DefaultLatticeOrderedApplyTest {
     }
 
     @Test
+    fun aChunkFailingInAGrowingSceneIsNotGivenUpWithinItsSession() = runBlocking {
+        // An outage while a live scene grows: each live step used to retry the stopped scene, so three steps gave the
+        // chunk up before the session ended and its messages never became memories. Now a live step leaves it to the
+        // seal, which tries once, and the catch-up after the outage writes it — serially and sixteen at a time.
+        for (parallelism in listOf(1, 16)) {
+            val outage = java.util.concurrent.atomic.AtomicBoolean(true)
+            val calls = AtomicInteger()
+            val model = SimModel(jitter = 2).apply {
+                extract = { user ->
+                    if ("topic=kyoto message 13" in user) {
+                        calls.incrementAndGet()
+                        if (outage.get()) throw org.foedusprogramme.lattice.core.MemoryModelUnavailableException("402 Insufficient Balance")
+                    }
+                    IngestKit.extraction(user)
+                }
+            }
+            val run = open(parallelism = parallelism, model = model)
+            run.driver.session("s1", talk("kyoto", 40))
+            val (scene, work) = run.lattice.withGraph { g -> g.scenes(IngestKit.CHAT).single().let { it to g.sceneWork(it.sceneId)!! } }
+            assertEquals(2, calls.get(), "parallelism $parallelism: one live attempt, one at the seal")
+            assertEquals(Triple(2, 0, SceneWorkState.EXTRACTING), Triple(work.extractAttempts, work.chunksFailed, work.state), "parallelism $parallelism")
+
+            outage.set(false)
+            run.catchUp()
+            val after = run.lattice.withGraph { g -> g.sceneWork(scene.sceneId)!! }
+            assertEquals(Triple(0, 0, scene.lastMessageId), Triple(after.extractAttempts, after.chunksFailed, after.extractedThrough), "parallelism $parallelism")
+            val kept = run.lattice.withGraph { g -> g.engrams().map { it.content } }
+            assertTrue(kept.any { it.startsWith("About kyoto, message 13 mentioned") }, "parallelism $parallelism: the chunk was written, not given up")
+        }
+    }
+
+    @Test
     fun aCloseCutsTheCallsInFlightOffAndCountsNothing() = runBlocking {
         val store = TestLatticeStore()
         val started = AtomicInteger()
