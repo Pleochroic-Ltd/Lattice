@@ -89,9 +89,10 @@ class LatticeAggregativeRecallTest {
     )
 
     /** Build the cluster: 8 members under one synthesized parent, among 12 unrelated distractors. */
-    private fun buildGraph(config: LatticeGraph.Config): Pair<LatticeGraph, Set<Long>> {
+    private fun buildGraph(config: LatticeGraph.Config, extraCue: String? = null): Pair<LatticeGraph, Set<Long>> {
         val emb = RegistryEmbedder()
         emb.register(AGG, 0 to 0.6, 1 to 0.8)
+        extraCue?.let { emb.register(it, 0 to 0.6, 1 to 0.8) } // AGG's vector: only the wording differs
         emb.register(ADV_CAT, 0 to 0.6, 1 to 0.8)   // SAME vector as AGG — only the text differs
         emb.register(ADV_MOVE, 0 to 0.6, 1 to 0.8)  // SAME vector as AGG
         emb.register(parentText, 0 to 0.51, 1 to 0.68, 2 to 0.527) // cos(AGG,P)=0.85
@@ -118,6 +119,53 @@ class LatticeAggregativeRecallTest {
 
     private fun recovered(hits: List<Activation>, memberIds: Set<Long>) =
         hits.count { it.engram.id in memberIds }
+
+    @Test
+    fun listQuestionsAreBreadthCuesOnlyWithListCuesOn() {
+        val lists = listOf(
+            "What books has Melanie read?",
+            "What are Dave's hobbies other than fixing cars?",
+            "What symbols are important to Caroline?",
+            "What desserts has Maria made?",
+            "What new yoga poses did Deborah try?",
+            "What ways do Deborah and Jolene use to enhance their yoga practice?",
+            "How many plants did I acquire in the last month?",
+            "What kinds of games is Ethan excited to play?",
+            "她都去过哪些城市",
+        )
+        for (cue in lists) {
+            assertTrue(LatticeGraph.aggregativeIntent(cue, listCues = true), cue)
+            assertTrue(!LatticeGraph.aggregativeIntent(cue, listCues = false), "legacy gate: $cue")
+        }
+        val narrow = listOf(
+            "What color did Nate choose for his hair?",
+            "When did John have a party with veterans?",
+            "What is Joanna inspired by?",
+            "Who did Maria have dinner with on May 3, 2023?",
+            "What did Caroline find in her neighborhood during her walk?",
+            "她的猫叫什么名字",
+        )
+        for (cue in narrow) assertTrue(!LatticeGraph.aggregativeIntent(cue, listCues = true), cue)
+        assertTrue(LatticeGraph.aggregativeIntent("总结她的生活有哪些变化", listCues = false), "the legacy scope words still fire")
+        assertTrue(LatticeGraph.Config.bgeM3().aggregativeListCues)
+        assertTrue(!LatticeGraph.Config().aggregativeListCues)
+    }
+
+    @Test
+    fun aListCueRecoversTheClusterWithListCuesOn() {
+        val list = "What changes has she been through?"
+        fun graph(listCues: Boolean): Pair<LatticeGraph, Set<Long>> {
+            val (g, members) = buildGraph(cfg(aggregative = true).copy(aggregativeListCues = listCues), extraCue = list)
+            return g to members
+        }
+        val (gOff, mOff) = graph(listCues = false)
+        val (gOn, mOn) = graph(listCues = true)
+        val off = recall(gOff, list, allowAggregative = true)
+        val on = recall(gOn, list, allowAggregative = true)
+        assertEquals(2, recovered(off, mOff), "legacy gate 1 misses a list question: only the spread slots")
+        assertTrue(recovered(on, mOn) >= 5, "the list cue reaches the parent's members (got ${recovered(on, mOn)})")
+        assertEquals(off.take(6).map { it.engram.id }, on.take(6).map { it.engram.id }, "base is preserved verbatim")
+    }
 
     @Test
     fun multiLevelHierarchyReturnsLeafFactsNotSubParents() {

@@ -302,6 +302,13 @@ class LatticeGraph(
         val dayWindowRecall: Boolean = false,
         /** Below this cue similarity a memory said in the window is not about the cue at all. */
         val dayWindowFloor: Double = 0.30,
+        /**
+         * Gate 1 of [aggregativeRecall] also fires on a LIST cue ([AGGREGATIVE_LIST_INTENT]): "what books has she
+         * read", "what are his hobbies", "how many plants did I buy", "哪些". The legacy regex knew only scope
+         * words ("life", "everything", "list all", "总结"), so a question that asks for every item of a kind never
+         * reached the parent's members. Gates 2 and 3 still decide. false = legacy (scope words only).
+         */
+        val aggregativeListCues: Boolean = false,
         /** Max ABSTRACTS members appended for an aggregative cue (see [aggregativeRecall]). Total emitted
          *  is bounded by limit + this; it subsumes (does not add to) the meaningful-spread slots. */
         val aggregativeAppendCap: Int = 6,
@@ -554,6 +561,8 @@ class LatticeGraph(
                 // never passes allowAggregative), and it unions the ABSTRACTS parent's members onto the
                 // base without reshuffling. Member-exclusion threshold pending live recalibration.
                 aggregativeRecall = true,
+                // List questions ("what books has she read", "how many …") are breadth cues too.
+                aggregativeListCues = true,
                 // ABSTRACT-CUE structural recall: a category cue ("哪一类地方") that empty-seeds; retrieves the
                 // synthesized ABSTRACTS gist parent + frequent leaves. Self-gated on ABSTRACT_INTENT + margin.
                 abstractRecall = true,
@@ -1773,8 +1782,8 @@ class LatticeGraph(
     ): List<Activation> {
         fun baseline() = appendMeaningfulSpread(ranked, limit, bestSeed, cueVec, meaningfulReached, originRank)
 
-        // Gate 1 — INTENT: a coarse whole-cue scope regex. Necessary, not sufficient.
-        if (!AGGREGATIVE_INTENT.containsMatchIn(cue.lowercase())) return baseline()
+        // Gate 1 — INTENT: a coarse whole-cue scope regex (and, when on, a list-cue regex). Necessary, not sufficient.
+        if (!aggregativeIntent(cue, config.aggregativeListCues)) return baseline()
 
         // Gate 2 — PARENT-EXISTS: highest-activated node the cue reached that has >= 2 ABSTRACTS members
         // (a synthesized parent; a leaf child carries exactly one). Decoupled from seed rank.
@@ -3946,6 +3955,27 @@ class LatticeGraph(
         private val AGGREGATIVE_INTENT = Regex(
             "life|everything|all about|list all|总结|概述|概括|一生|所有关于|全部|哪些变化",
         )
+
+        /**
+         * Gate 1's list cues (see [Config.aggregativeListCues]): a question after every item of a kind. "what" /
+         * "which" before a plural noun and a verb ("what books has", "what new yoga poses did", "which places
+         * are"), a count ("how many"), kinds and ways ("what kinds of", "in what ways"), some named plurals
+         * ("hobbies", "activities"), "name all"; 哪些 / 几个 / 多少个 / 多少种 / 多少次 / 都有什么 in Chinese. Coarse on
+         * purpose, like [AGGREGATIVE_INTENT]: gates 2 and 3 decide.
+         */
+        private val AGGREGATIVE_LIST_INTENT = Regex(
+            "\\b(?:what|which)\\s+(?:\\w+\\s+){0,2}\\w+s\\s+(?:has|have|had|do|does|did|are|were|is|was|can|could|will|would)\\b" +
+                "|\\bhow many\\b|\\b(?:what|which) (?:kinds?|types?|sorts?) of\\b|\\b(?:in )?what ways\\b" +
+                "|\\bwhat (?:are|were) (?:some|all)\\b|\\b(?:name|list) (?:all|some|every)\\b" +
+                "|\\bhobbies\\b|\\bactivities\\b|\\binterests\\b" +
+                "|哪些|几个|多少个|多少种|多少次|都有什么|都有哪",
+        )
+
+        /** Whether [cue] passes gate 1 of [Config.aggregativeRecall]; [listCues] adds [AGGREGATIVE_LIST_INTENT]. */
+        internal fun aggregativeIntent(cue: String, listCues: Boolean): Boolean {
+            val c = cue.lowercase()
+            return AGGREGATIVE_INTENT.containsMatchIn(c) || (listCues && AGGREGATIVE_LIST_INTENT.containsMatchIn(c))
+        }
 
         // [Category "哪一类" and reflect/importance "最该记" cues are NO LONGER phrasing-routed — they are
         //  served by softFallback (cosine+salience blend on empty recall), which keys on match MAGNITUDE, not
