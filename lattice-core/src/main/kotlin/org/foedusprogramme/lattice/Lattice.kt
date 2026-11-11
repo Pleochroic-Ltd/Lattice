@@ -89,6 +89,7 @@ class GraphBusyException(message: String) : RuntimeException(message)
 data class RecallOptions(
     /** Most memories to bring back; null = [LatticeSettings.searchLimit] for an explicit search, else [LatticeSettings.retrievalLimit]. */
     val limit: Int? = null,
+    /** How the recall feeds back; [Reinforce.NONE] leaves the graph and the focus stack ("back then") untouched. */
     val reinforce: Reinforce = Reinforce.SOFT,
     /**
      * An explicit search (a tool call) rather than the automatic per-turn recall: no emit gate, aggregative questions

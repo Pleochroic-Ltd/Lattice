@@ -127,7 +127,9 @@ class DefaultLatticeRecallTest {
             g.remember("beta 项目截止", salience = 0.7, eventDate = "2025-03")
             g.remember("alpha 用户领养了猫", salience = 0.6, eventDate = "2025-03")
         }
-        assertEquals(1, lattice.recall("beta 项目", read).hits.size)
+        // A read-only recall puts nothing in focus (see aReadOnlyRecallLeavesTheFocusStackAlone); one that feeds back does.
+        assertEquals(0, lattice.recall("beta 项目", read).let { lattice.recall("那阵子还聊了什么", read) }.hits.size)
+        assertEquals(1, lattice.recall("beta 项目", RecallOptions(explicit = true)).hits.size)
         assertEquals(2, lattice.recall("那阵子还聊了什么", read).hits.size, "the back-reference resolves to the month in focus")
         lattice.close()
     }
@@ -189,6 +191,23 @@ class DefaultLatticeRecallTest {
         assertEquals("- [2026-07-25] the user bought a new mouse", iso.recall("new mouse", RecallOptions(explicit = true)).text)
         assertTrue(iso.recall("new mouse").text.startsWith("- [2026-07-25 · ${RecallMarkers.EN.relativeTime(7)}] "))
         iso.close()
+    }
+
+    @Test
+    fun aReadOnlyRecallLeavesTheFocusStackAlone() = runBlocking {
+        val lattice = LatticeTestKit.open(graphConfig = LatticeGraph.Config(temporalLayer = true, temporalRetrieval = true), now = fixed)
+        lattice.withGraph { g ->
+            g.remember("the user moved to Lisbon", eventDate = "2026-03-02")
+            g.remember("the user adopted a cat named Byte", eventDate = "2026-05-10")
+        }
+        lattice.recall("moved to Lisbon", RecallOptions(explicit = true))
+        val before = lattice.withGraph { lattice.focusMonths() }
+        assertEquals(java.time.YearMonth.of(2026, 3), before.first())
+        lattice.recall("adopted a cat", RecallOptions(explicit = true, reinforce = Reinforce.NONE))
+        assertEquals(before, lattice.withGraph { lattice.focusMonths() }, "a NONE recall pushes no month")
+        lattice.recall("adopted a cat", RecallOptions(explicit = true))
+        assertEquals(java.time.YearMonth.of(2026, 5), lattice.withGraph { lattice.focusMonths() }.first())
+        lattice.close()
     }
 
     @Test

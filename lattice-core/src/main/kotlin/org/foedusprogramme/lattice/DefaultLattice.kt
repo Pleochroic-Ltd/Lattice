@@ -180,6 +180,9 @@ internal class DefaultLattice(
     /** The event months the dialogue has been dwelling on, for bare back-references; graph thread only. */
     private val focusStack = FocusStack()
 
+    /** The focus stack's months, most recent first (graph thread only; for tests). */
+    internal fun focusMonths(): List<YearMonth> = focusStack.snapshot()
+
     /**
      * Clusters whose synthesized parent the graph refused (a single-child paraphrase), keyed by the sorted child ids:
      * an unchanged refused set is not sent to the model again. A membership change is a new key, so it is retried.
@@ -397,7 +400,9 @@ internal class DefaultLattice(
         }
         val first = temporalDispatch(g, cue, limit, reinforce, applyEmitGate, allowAggregative)
         val result = if (explicit && first.isEmpty()) g.appendSceneRecall(cue, g.softFallback(cue, limit), limit) else first
-        pushFocus(result.mapNotNull { it.engram.eventYearMonth })
+        // A read-only recall (an inspection, a benchmark question) leaves no trace, the focus stack included: a later
+        // "back then" must not resolve against what was merely looked at.
+        if (reinforce != Reinforce.NONE) pushFocus(result.mapNotNull { it.engram.eventYearMonth })
         return result
     }
 
