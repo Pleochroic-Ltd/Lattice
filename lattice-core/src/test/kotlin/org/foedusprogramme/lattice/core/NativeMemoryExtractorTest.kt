@@ -226,6 +226,49 @@ class NativeMemoryExtractorTest {
     }
 
     @Test
+    fun `a dated memory loses its now-relative words and an undated one keeps them`() {
+        val raw = """{"memories":[
+            {"ref":"m1","content":"Ethan bought a new adventure book three days ago.","event_date":"2022-04-26"},
+            {"ref":"m2","content":"Yesterday, Melanie went to a pottery class with her kids.","event_date":"2023-07-14"},
+            {"ref":"m3","content":"Gina will open her store next week.","due_date":"2023-08-01"},
+            {"ref":"m4","content":"Ethan bought a new adventure book three days ago."},
+            {"ref":"m5","content":"用户昨天去了图书馆的读书会","event_date":"2023-05-19"}],"relations":[]}"""
+        val m = NativeMemoryExtractor.parse(raw)!!.memories.associateBy { it.ref }
+        assertEquals("Ethan bought a new adventure book.", m.getValue("m1").content)
+        assertEquals("Melanie went to a pottery class with her kids.", m.getValue("m2").content)
+        assertEquals("Gina will open her store.", m.getValue("m3").content)
+        assertEquals("Ethan bought a new adventure book three days ago.", m.getValue("m4").content, "undated: the words are its only time")
+        assertEquals("用户去了图书馆的读书会", m.getValue("m5").content)
+    }
+
+    @Test
+    fun `stripNowRelative unit table`() {
+        fun strip(s: String) = NativeMemoryExtractor.stripNowRelative(s)
+        assertEquals("Caroline went to an LGBTQ support group.", strip("Caroline went to an LGBTQ support group yesterday."))
+        assertEquals("John had a party with veterans.", strip("John had a party with veterans last Friday."))
+        assertEquals("Nate got a puppy and named it Max.", strip("Nate got a puppy about two weeks ago and named it Max."))
+        assertEquals("User upgraded the road bike's pedals to clipless pedals.", strip("User upgraded the road bike's pedals to clipless pedals today."))
+        assertEquals("Maria renovated the community center with John.", strip("Last year, Maria renovated the community center with John."))
+        assertEquals("Jon lost his job at Door Dash.", strip("Jon lost his job at Door Dash this past weekend."))
+        // Left alone: no amount of time, a dangling word, a possessive, or nothing much left.
+        assertEquals("The user just got back from Paris.", strip("The user just got back from Paris."))
+        assertEquals("Sam has played guitar since last year.", strip("Sam has played guitar since last year."))
+        assertEquals("Sam finished the project by the end of last month.", strip("Sam finished the project by the end of last month."))
+        assertEquals("Yesterday's game went into overtime.", strip("Yesterday's game went into overtime."))
+        assertEquals("It happened yesterday.", strip("It happened yesterday."))
+        assertEquals("用户从去年开始学钢琴", strip("用户从去年开始学钢琴"))
+    }
+
+    @Test
+    fun `the prompt resolves a weekday against the reference weekday and keeps resolved phrases out of content`() {
+        val on = NativeMemoryExtractor.buildPrompt(null, temporalLayer = true)
+        assertTrue("the most recent Friday BEFORE the reference date" in on, on)
+        assertTrue("leave it OUT of `content`" in on, on)
+        assertTrue("overrides the \"How recent\" rule" in on, on)
+        assertFalse("BEFORE the reference date" in NativeMemoryExtractor.buildPrompt(null, temporalLayer = false))
+    }
+
+    @Test
     fun `a non-string event date does not throw and yields no date`() {
         val raw = """
             {"memories":[
@@ -268,7 +311,7 @@ class NativeMemoryExtractorTest {
         val ref = Instant.parse("2025-03-22T10:00:00Z")
         val on = CapturingModel()
         NativeMemoryExtractor(on, userName = "Ethan", temporalLayer = true, zone = ZoneOffset.UTC).extract("[user] 上周我换了工作。", referenceTime = ref)
-        assertTrue(on.lastUser.startsWith("Reference time: today is 2025-03-22\n\n"), on.lastUser)
+        assertTrue(on.lastUser.startsWith("Reference time: today is 2025-03-22 (Saturday)\n\n"), on.lastUser)
         assertTrue(on.lastUser.endsWith("[user] 上周我换了工作。"), "the transcript follows")
 
         val who = NativeMemoryExtractor.whoIsWhoLine(null, emptySet())

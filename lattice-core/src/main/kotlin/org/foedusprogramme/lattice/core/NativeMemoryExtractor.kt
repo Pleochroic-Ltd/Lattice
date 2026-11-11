@@ -13,6 +13,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.util.Locale
 
 /**
  * Reads a transcript and asks the model for:
@@ -56,7 +58,7 @@ class NativeMemoryExtractor(
      * Extracts memories from [transcript]. With the temporal layer on AND a trusted [referenceTime] (a real message
      * timestamp, never the clock at extraction time), a "Reference time: today is YYYY-MM-DD" line is prepended so the
      * model can resolve now-relative phrases ("last week", "three months ago") to an absolute date — which it writes
-     * into the STRUCTURED `event_date`, not into the memory content. Otherwise the transcript is sent as it is
+     * into the STRUCTURED `event_date`, not into the memory content. The line also names the weekday. Otherwise the transcript is sent as it is
      * (in-transcript-anchored relatives still resolve without any external clock).
      *
      * Throws [UnparseableExtractionException] when a reply is not parseable JSON (a deterministic, poison-window
@@ -93,10 +95,14 @@ class NativeMemoryExtractor(
     private fun withReferenceTime(transcript: String, referenceTime: Instant?): String {
         if (!temporalLayer || referenceTime == null) return transcript
         // In the user's zone, not UTC: near midnight the UTC date can be off by one.
-        val today = REFERENCE_DATE_FORMAT.format(referenceTime.atZone(zone))
+        val local = referenceTime.atZone(zone)
+        val today = REFERENCE_DATE_FORMAT.format(local)
+        // The weekday rides along: without it "last Friday" said on a Saturday was resolved to the Friday a week
+        // earlier (the model computed the weekday itself, and got it wrong).
+        val weekday = local.dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)
         // English on purpose: a Chinese line here biased the model to write Chinese memories even for English or
         // German conversations. The language of `content` is governed by the system prompt.
-        return "Reference time: today is $today\n\n$transcript"
+        return "Reference time: today is $today ($weekday)\n\n$transcript"
     }
 
     companion object {
@@ -352,6 +358,15 @@ class NativeMemoryExtractor(
               expressions ("last week", "three months ago", "last year") into an absolute `event_date`.
             - In-transcript relative times (a base date given in the same passage) resolve to an absolute
               `event_date` the same way.
+            - A weekday counts from the weekday on the "Reference time" line: "last Friday" (or "on Friday")
+              for something that already happened is the most recent Friday BEFORE the reference date — said
+              on a Saturday, that is the day before, not eight days before.
+            - Once a now-relative phrase is resolved into `event_date` or `due_date`, leave it OUT of `content`:
+              "yesterday", "today", "three days ago", "last Friday", "last month", "last year", "next week"
+              would be read again later against another day and counted twice ("Ethan bought an adventure
+              book" with event_date 2022-04-26, not "Ethan bought an adventure book three days ago"). This
+              overrides the "How recent" rule for such phrases; words that name no amount of time ("just",
+              "recently", "the other day") may stay.
             - Never invent a date for a fact that carries no time information; if it cannot be resolved
               reliably, OMIT `event_date` — never guess.
             - Plans, goals, intentions, deadlines and appointments: `event_date` is NEVER their target date.
@@ -374,16 +389,20 @@ class NativeMemoryExtractor(
                 val ref = obj["ref"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 val content = obj["content"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
                 if (ref.isBlank() || content.isBlank()) return@mapNotNull null
+                // The structured event date, validated to ISO YYYY(-MM(-DD)). A non-conforming or absent value
+                // is dropped to null (never fabricated or stamped into content). A non-STRING JSON value must
+                // NOT throw — `.jsonPrimitive` raises on a non-primitive and would bypass poison-window
+                // classification; `as?` yields null instead (treated as no date).
+                val eventDate = normalizeEventDate((obj["event_date"] as? JsonPrimitive)?.contentOrNull)
+                // A plan's / goal's target date, validated the same way (absent when the switch is OFF).
+                val dueDate = normalizeEventDate((obj["due_date"] as? JsonPrimitive)?.contentOrNull)
                 ExtractedMemory(
                     ref = ref,
-                    content = content,
-                    // The structured event date, validated to ISO YYYY(-MM(-DD)). A non-conforming or absent value
-                    // is dropped to null (never fabricated or stamped into content). A non-STRING JSON value must
-                    // NOT throw — `.jsonPrimitive` raises on a non-primitive and would bypass poison-window
-                    // classification; `as?` yields null instead (treated as no date).
-                    eventDate = normalizeEventDate((obj["event_date"] as? JsonPrimitive)?.contentOrNull),
-                    // A plan's / goal's target date, validated the same way (absent when the switch is OFF).
-                    dueDate = normalizeEventDate((obj["due_date"] as? JsonPrimitive)?.contentOrNull),
+                    // A resolved date makes a now-relative phrase in the wording redundant, and harmful: read later,
+                    // "three days ago" is counted again from the day it was said.
+                    content = if (eventDate != null || dueDate != null) stripNowRelative(content) else content,
+                    eventDate = eventDate,
+                    dueDate = dueDate,
                     salience = (obj["salience"]?.jsonPrimitive?.doubleOrNull ?: 0.5).coerceIn(0.0, 1.0),
                     // A literal 0.0, out-of-range, or missing arousal all map to null (== no boost
                     // downstream). Belt-and-suspenders with combine(), which folds them to 0.0 anyway.
@@ -484,6 +503,54 @@ class NativeMemoryExtractor(
                 }
             }
             return out.toString()
+        }
+
+        private const val EN_COUNT =
+            "\\d{1,3}|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a couple of|a few|several"
+        private const val EN_WEEKDAY = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+        private const val EN_SPAN = "week|weekend|month|year|spring|summer|fall|autumn|winter|$EN_WEEKDAY"
+
+        /**
+         * A phrase that counts time from the moment of speaking, with what binds it to the sentence: an optional
+         * comma before it, and an optional "earlier" / "about" in front. Never after "since", "until", "of" and the
+         * like, where removing it would leave the word dangling ("has played guitar since last year"), and never a
+         * possessive ("yesterday's game").
+         */
+        private val EN_NOW_RELATIVE = Regex(
+            ",?\\s*(?<!\\b(?:since|until|till|before|after|by|from|of|during|for|between|and|or|than)\\s{1,3})" +
+                "\\b(?:earlier\\s+|later\\s+)?(?:" +
+                "the day before yesterday|the day after tomorrow|yesterday|today|tonight|tomorrow|last night" +
+                "|this (?:morning|afternoon|evening)" +
+                "|(?:about |around |roughly |nearly |almost |over |just over |just under )?(?:$EN_COUNT) (?:days?|weeks?|months?|years?) ago" +
+                "|(?:last|this past|this|next) (?:$EN_SPAN)" +
+                ")\\b(?!['’]s)",
+            RegexOption.IGNORE_CASE,
+        )
+        private val CN_NOW_RELATIVE = Regex(
+            "(?<![从自到至])(?:大前天|前天|昨天|昨晚|今天|今晚|明天|后天|上周[一二三四五六日天]?|下周[一二三四五六日天]?" +
+                "|上个?星期[一二三四五六日天]?|上个?月|下个?月|去年|前年|明年" +
+                "|[0-9一二三四五六七八九十两几]{1,3}\\s*(?:天|周|个星期|个月|年)前)",
+        )
+
+        /**
+         * [content] without the now-relative phrases a dated memory needs no more ("yesterday", "three days ago",
+         * "last Friday", "上周", "三天前"), its spacing and punctuation tidied; [content] as it is when nothing is left
+         * to say without them.
+         */
+        internal fun stripNowRelative(content: String): String {
+            val en = EN_NOW_RELATIVE.replace(content, "")
+            val cn = CN_NOW_RELATIVE.replace(en, "")
+            if (cn == content) return content
+            var out = cn.replace(Regex("\\s{2,}"), " ")
+                .replace(Regex("\\s+([,.;:!?，。；：！？])"), "$1")
+                .replace(Regex(",(?=[.;:!?])"), "")
+                .replace(Regex("^[\\s,，]+"), "")
+                .trim()
+            if (content.firstOrNull()?.isUpperCase() == true) out = out.replaceFirstChar { it.uppercaseChar() }
+            // A sentence that was mostly its time phrase is kept whole: a stub would say less than the original.
+            val words = out.split(Regex("\\s+")).size
+            if (out.length < 8 || out.length < content.length / 2 || (words < 3 && ' ' in content)) return content
+            return out
         }
 
         /** ISO event-date normalizer/validator: accepts YYYY, YYYY-MM or YYYY-MM-DD (zero-padding the month/
