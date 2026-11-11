@@ -354,8 +354,8 @@ internal class DefaultLattice(
         // that turn alone, so it also shows how long ago and the period.
         val dating = when {
             !sceneEpisodes -> RecallDating.LEGACY
-            explicit -> RecallDating.absolute(zone)
-            else -> RecallDating.turnEnd(options.chatKey, now(), zone)
+            explicit -> RecallDating.absolute(zone, settings.recallDatesInWords)
+            else -> RecallDating.turnEnd(options.chatKey, now(), zone, settings.recallDatesInWords)
         }
         onGraphBounded { g ->
             val hits = dispatchTemporal(g, cue, options.limit ?: if (explicit) settings.searchLimit else settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)

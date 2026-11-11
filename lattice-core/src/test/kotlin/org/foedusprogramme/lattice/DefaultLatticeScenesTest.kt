@@ -1,6 +1,7 @@
 package org.foedusprogramme.lattice
 
 import kotlinx.coroutines.runBlocking
+import org.foedusprogramme.lattice.core.RecallMarkers
 import org.foedusprogramme.lattice.core.Engram
 import org.foedusprogramme.lattice.core.FakeConversationSource
 import org.foedusprogramme.lattice.core.LatticeGraph
@@ -161,9 +162,10 @@ class DefaultLatticeScenesTest {
         lattice.scenes!!.awaitIdle()
 
         val explicit = lattice.recall("kyoto", RecallOptions(explicit = true, chatKey = CHAT)).text
-        assertTrue("said 2026-07-30" in explicit, explicit)
+        assertTrue("said Thu 30 July 2026" in explicit, explicit)
+        assertTrue(explicit.trimEnd().endsWith(RecallMarkers.EN.legendRelativeSuffix), "the legend says what a relative time counts from")
         val perTurn = lattice.recall("kyoto", RecallOptions(chatKey = CHAT)).text
-        assertTrue(perTurn.isEmpty() || "2026-07-30 · " in perTurn, "a per-turn block also says how long ago: $perTurn")
+        assertTrue(perTurn.isEmpty() || "said Thu 30 July 2026 · " in perTurn, "a per-turn block also says how long ago: $perTurn")
 
         val legacy = open(scenes = sceneSettings.copy(sceneEpisodes = false))
         legacy.withGraph { g -> g.remember("The user talked about kyoto", saidFrom = Instant.parse("2026-07-30T09:00:00Z")); Unit }

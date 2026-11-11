@@ -128,6 +128,45 @@ class RecallFormatterTest {
     }
 
     @Test
+    fun `in words a block shows days, months and years as words and the said day with its weekday`() {
+        val words = RecallDating.absolute(ZoneOffset.UTC, inWords = true)
+        val book = engram("Ethan bought a new adventure book", eventDate = "2022-04-26", saidFrom = Instant.parse("2022-04-29T10:00:00Z"))
+        val party = engram("John had a party with veterans last Friday", saidFrom = Instant.parse("2023-05-20T18:00:00Z"))
+        val month = engram("The user moved to Seattle", eventDate = "2023-04", saidFrom = t2)
+        val year = engram("John renovated his hometown community center", eventDate = "2022", saidFrom = t2)
+        val plan = engram("The user aims for level 100 in Apex", saidFrom = t1, saidTo = t2, dueDate = "2023-12-31")
+        val block = format(listOf(book, party, month, year, plan), markers = en, dating = words)
+        val lines = block.lines()
+        assertEquals("- [26 April 2022 · said Fri 29 April 2022] Ethan bought a new adventure book", lines[0])
+        assertEquals("- [said Sat 20 May 2023] John had a party with veterans last Friday", lines[1])
+        assertEquals("- [April 2023 · said Wed 15 March 2023] The user moved to Seattle", lines[2])
+        assertEquals("- [2022 · said Wed 15 March 2023] John renovated his hometown community center", lines[3])
+        assertEquals("- [due 31 December 2023 · said Wed 11 January 2023 to Wed 15 March 2023] The user aims for level 100 in Apex", lines[4])
+        assertEquals(en.legendDates + en.legendRelativeSuffix, lines[5], "the legend says what a relative time counts from")
+        assertTrue("counts from the day the memory was said, not from today" in lines[5])
+        assertFalse(Regex("\\d{4}-\\d{2}").containsMatchIn(block), "no ISO date left: $block")
+
+        val zhBlock = format(listOf(book), dating = words)
+        assertTrue(zhBlock.startsWith("- [2022年4月26日 · 提到 2022年4月29日（周五）] "), zhBlock)
+        assertTrue(zhBlock.endsWith(zh.legendDates + zh.legendRelativeSuffix), zhBlock)
+
+        // The turn-end block keeps its relative time; ISO stays the default of a bare RecallDating.
+        val tail = RecallDating.turnEnd(null, Instant.parse("2022-05-03T10:00:00Z"), ZoneOffset.UTC, inWords = true)
+        assertTrue(format(listOf(book), markers = en, dating = tail).startsWith("- [26 April 2022 · ${en.relativeTime(7)} · said Fri 29 April 2022] "))
+        val iso = format(listOf(book), markers = en, dating = RecallDating.absolute(ZoneOffset.UTC))
+        assertTrue(iso.startsWith("- [2022-04-26 · said 2022-04-29] ") && en.legendRelativeSuffix !in iso, iso)
+    }
+
+    @Test
+    fun `in words a scene line shows its days in words`() {
+        val hub = engram("narr|undersea|story", isEpisodeHub = true)
+        val lookup = FakeLookup()
+        lookup.hubs[hub.id] = scene(1, "Undersea tunnel", from = "2026-09-20", to = "2026-09-21", hub = hub.id)
+        val line = format(listOf(hub), lookup, markers = en, dating = RecallDating.absolute(ZoneOffset.UTC, inWords = true)).lines().first()
+        assertEquals("- [Scene: Undersea tunnel · 20 September 2026～21 September 2026] narr|undersea|story", line)
+    }
+
+    @Test
     fun `a memory without a span and the legacy block are unchanged`() {
         val dated = engram("The user went to the Holiday Market", eventDate = "2023-05-20")
         assertEquals("- [2023-05-20] The user went to the Holiday Market", format(listOf(dated), markers = en, dating = RecallDating.absolute(ZoneOffset.UTC)))

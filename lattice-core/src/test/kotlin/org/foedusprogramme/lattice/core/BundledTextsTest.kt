@@ -38,6 +38,11 @@ class BundledTextsTest {
             recall.periodTag("p")
             recall.said("2026-01-01", "2026-01-02")
             recall.due("2026-01-03")
+            recall.isoInWords("2026-01-03")
+            recall.isoInWords("2026-01")
+            recall.isoInWords("2026")
+            recall.saidDay(java.time.LocalDate.parse("2026-01-03"))
+            recall.legendRelativeSuffix
             for (days in listOf(0L, 1L, 3L, 7L, 20L, 90L, 365L, 800L)) {
                 recall.relativeTime(days)
                 recall.relativeTime(-days)

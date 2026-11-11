@@ -1,5 +1,7 @@
 package org.foedusprogramme.lattice.core
 
+import java.time.LocalDate
+import java.time.YearMonth
 import kotlin.math.abs
 
 /**
@@ -95,6 +97,43 @@ class RecallMarkers private constructor(
     /** A plan's / goal's target date. */
     fun due(date: String): String = fill("lattice.recall.date.due", "date" to date)
 
+    private val monthNames: List<String> by lazy { string("lattice.recall.date.months").split(',').map { it.trim() } }
+    private val weekdayNames: List<String> by lazy { string("lattice.recall.date.weekdays").split(',').map { it.trim() } }
+
+    /** A day in words: `19 May 2023` (en) / `2023年5月19日` (zh). */
+    fun day(date: LocalDate): String =
+        fill("lattice.recall.date.day", "day" to date.dayOfMonth, "month" to monthNames[date.monthValue - 1], "year" to date.year)
+
+    /** The day a memory was said, in words with its weekday — what a relative time inside it counts from. */
+    fun saidDay(date: LocalDate): String = fill(
+        "lattice.recall.date.said_day",
+        "weekday" to weekdayNames[date.dayOfWeek.value - 1], "day" to date.dayOfMonth,
+        "month" to monthNames[date.monthValue - 1], "year" to date.year,
+    )
+
+    /** A month in words: `May 2023` / `2023年5月`. */
+    fun month(month: YearMonth): String =
+        fill("lattice.recall.date.month", "month" to monthNames[month.monthValue - 1], "year" to month.year)
+
+    /** A year in words: `2023` / `2023年`. */
+    fun year(year: Int): String = fill("lattice.recall.date.year", "year" to year)
+
+    /**
+     * An ISO date as the block shows it in words: a day, a month or a year by its precision; anything else as it is.
+     */
+    fun isoInWords(iso: String): String {
+        val s = iso.trim()
+        return when {
+            ISO_DAY.matches(s) -> runCatching { day(LocalDate.parse(s)) }.getOrDefault(s)
+            ISO_MONTH.matches(s) -> runCatching { month(YearMonth.parse(s)) }.getOrDefault(s)
+            ISO_YEAR.matches(s) -> year(s.toInt())
+            else -> s
+        }
+    }
+
+    /** Appended to the said / due legend when the block shows dates in words: what a relative time counts from. */
+    val legendRelativeSuffix: String by lazy { string("lattice.recall.legend.relative_suffix") }
+
     /**
      * How a person says how long ago a day was, [daysAgo] calendar days before today (negative = ahead): today /
      * yesterday / N days, then about N weeks (up to 8), about N months, about N years (zh with Chinese numerals and
@@ -176,6 +215,9 @@ class RecallMarkers private constructor(
 
     companion object {
         private val WHITESPACE = Regex("\\s+")
+        private val ISO_DAY = Regex("\\d{4}-\\d{2}-\\d{2}")
+        private val ISO_MONTH = Regex("\\d{4}-\\d{2}")
+        private val ISO_YEAR = Regex("\\d{4}")
         private const val DAYS_PER_WEEK = 7L
 
         /** From this many days on, months: weeks run up to "about 8 weeks" (56 days is 约八周前). */

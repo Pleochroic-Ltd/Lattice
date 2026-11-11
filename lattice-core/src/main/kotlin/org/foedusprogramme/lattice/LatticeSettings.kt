@@ -32,6 +32,12 @@ data class LatticeSettings(
     val retrievalLimit: Int = 8,
     /** Most memories an explicit search brings back when the call names no limit. */
     val searchLimit: Int = 16,
+    /**
+     * With scene episodes on, a recall block writes its dates in words ("19 May 2023"; said days with their weekday)
+     * and its dates legend says that a relative time inside a memory counts from the day it was said. false = ISO
+     * dates.
+     */
+    val recallDatesInWords: Boolean = true,
     val graphReadTimeout: Duration = 15.seconds,
     val shutdownTimeout: Duration = 30.seconds,
     /** Most model-judged pairs a sleep reviews. */

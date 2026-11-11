@@ -178,10 +178,17 @@ class DefaultLatticeRecallTest {
         val settings = LatticeTestKit.settings().copy(temporalLayer = true, scenes = SceneSettings(enabled = true, sceneEpisodes = true))
         val lattice = LatticeTestKit.open(settings = settings, graphConfig = LatticeGraph.Config(temporalLayer = true), now = fixed)
         lattice.withGraph { g -> g.remember("the user bought a new mouse", eventDate = "2026-07-25") }
-        assertEquals("- [2026-07-25] the user bought a new mouse", lattice.recall("new mouse", RecallOptions(explicit = true)).text)
+        assertEquals("- [25 July 2026] the user bought a new mouse", lattice.recall("new mouse", RecallOptions(explicit = true)).text)
         val perTurn = lattice.recall("new mouse").text
-        assertTrue(perTurn.startsWith("- [2026-07-25 · ${RecallMarkers.EN.relativeTime(7)}] "), perTurn)
+        assertTrue(perTurn.startsWith("- [25 July 2026 · ${RecallMarkers.EN.relativeTime(7)}] "), perTurn)
         lattice.close()
+
+        // recallDatesInWords off: the ISO block.
+        val iso = LatticeTestKit.open(settings = settings.copy(recallDatesInWords = false), graphConfig = LatticeGraph.Config(temporalLayer = true), now = fixed)
+        iso.withGraph { g -> g.remember("the user bought a new mouse", eventDate = "2026-07-25") }
+        assertEquals("- [2026-07-25] the user bought a new mouse", iso.recall("new mouse", RecallOptions(explicit = true)).text)
+        assertTrue(iso.recall("new mouse").text.startsWith("- [2026-07-25 · ${RecallMarkers.EN.relativeTime(7)}] "))
+        iso.close()
     }
 
     @Test

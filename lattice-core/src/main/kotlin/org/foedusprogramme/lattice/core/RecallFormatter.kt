@@ -138,7 +138,10 @@ object RecallFormatter {
         // than a static system prompt so a cached prompt prefix never changes, and it is in the turn's language, like
         // the markers it explains. The block never holds a blank line: the tags are single-line.
         val legend = markers.legend(sawScene, sawThread, sawPeriod, sawDates) ?: return body
-        return "$body\n$legend"
+        // In words, a said date also says what a relative time inside the memory counts from: a reader took
+        // "three days ago" from today, or from the event date, and counted it twice.
+        val relative = if (sawDates && dating.inWords) markers.legendRelativeSuffix else ""
+        return "$body\n$legend$relative"
     }
 
     /**
@@ -150,7 +153,11 @@ object RecallFormatter {
      *  - anything else: the temporal-layer date tag, if any.
      */
     private fun lead(hit: Activation, scene: SceneRecord?, temporalLayer: Boolean, dating: RecallDating, markers: RecallMarkers): String {
-        if (scene != null) return "- ${markers.sceneTag(scene.title, scene.dateFrom, scene.dateTo, scene.inProgress)}"
+        if (scene != null) {
+            val from = scene.dateFrom?.let { if (dating.inWords) markers.isoInWords(it) else it }
+            val to = scene.dateTo?.let { if (dating.inWords) markers.isoInWords(it) else it }
+            return "- ${markers.sceneTag(scene.title, from, to, scene.inProgress)}"
+        }
         val prefix = if (hit.engram.isEpisode) "- ${markers.episode}" else "- "
         return "$prefix${datePrefix(hit, temporalLayer, dating, markers)}"
     }
@@ -175,10 +182,11 @@ object RecallFormatter {
         if (dating.dayPrecision && (e.saidFrom != null || e.dueDate != null)) return spanPrefix(e, dating, markers)
         val date = e.eventDate ?: return ""
         val day = if (dating.dayPrecision) fullDay(date) else null
-        if (day == null) return "[${date.take(7)}] "
-        val turnEnd = dating.turnEnd ?: return "[$day] "
+        if (day == null) return "[${if (dating.inWords) markers.isoInWords(date.take(7)) else date.take(7)}] "
+        val shown = if (dating.inWords) markers.day(day) else day.toString()
+        val turnEnd = dating.turnEnd ?: return "[$shown] "
         val daysAgo = ChronoUnit.DAYS.between(day, LocalDate.ofInstant(turnEnd.now, turnEnd.zone))
-        return "[$day · ${markers.relativeTime(daysAgo)}] "
+        return "[$shown · ${markers.relativeTime(daysAgo)}] "
     }
 
     /**
@@ -191,15 +199,25 @@ object RecallFormatter {
         val turnEnd = dating.turnEnd
         fun relative(day: LocalDate): String? =
             turnEnd?.let { markers.relativeTime(ChronoUnit.DAYS.between(day, LocalDate.ofInstant(it.now, it.zone))) }
+        // In words ([RecallDating.inWords]): "19 May 2023", "May 2023", "2023"; the said days with their weekday.
+        fun shown(iso: String): String {
+            val day = fullDay(iso)
+            if (!dating.inWords) return day?.toString() ?: iso.take(7)
+            return day?.let(markers::day) ?: markers.isoInWords(iso.take(7))
+        }
         val eventDay = e.eventDate?.let(::fullDay)
-        e.eventDate?.let { parts += eventDay?.toString() ?: it.take(7) }
+        e.eventDate?.let { parts += shown(it) }
         eventDay?.let { day -> relative(day)?.let { parts += it } }
-        e.dueDate?.let { parts += markers.due(fullDay(it)?.toString() ?: it.take(7)) }
+        e.dueDate?.let { parts += markers.due(shown(it)) }
         val zone = turnEnd?.zone ?: dating.zone
         val from = e.saidFrom?.let { LocalDate.ofInstant(it, zone) }
         val to = (e.saidTo ?: e.saidFrom)?.let { LocalDate.ofInstant(it, zone) }
         if (from != null && to != null) {
-            parts += markers.said(from.toString(), to.toString())
+            if (dating.inWords) {
+                parts += markers.said(markers.saidDay(from), if (from == to) markers.saidDay(from) else markers.saidDay(to))
+            } else {
+                parts += markers.said(from.toString(), to.toString())
+            }
             if (eventDay == null) relative(to)?.let { parts += it }
         }
         return if (parts.isEmpty()) "" else "[${parts.joinToString(" · ")}] "
@@ -305,9 +323,15 @@ data class RecallDating(
     val turnEnd: TurnEnd? = null,
     /** Zone a memory's said span is read in as calendar days (the turn-end recall uses its own). */
     val zone: ZoneId = ZoneOffset.UTC,
+    /**
+     * Dates in words ("19 May 2023", said days with their weekday) instead of ISO, and the dates legend says what a
+     * relative time inside a memory counts from. With day precision only.
+     */
+    val inWords: Boolean = false,
 ) {
     init {
         require(turnEnd == null || dayPrecision) { "a turn-end recall shows the day" }
+        require(!inWords || dayPrecision) { "dates in words come with day precision" }
     }
 
     /** The render-time context of a turn-end recall: the turn's chat, the clock and the runtime zone. */
@@ -317,9 +341,10 @@ data class RecallDating(
         val LEGACY = RecallDating()
         val ABSOLUTE = RecallDating(dayPrecision = true)
 
-        /** [ABSOLUTE] reading said spans in [zone] (the runtime zone). */
-        fun absolute(zone: ZoneId) = RecallDating(dayPrecision = true, zone = zone)
+        /** [ABSOLUTE] reading said spans in [zone] (the runtime zone), dates [inWords] or ISO. */
+        fun absolute(zone: ZoneId, inWords: Boolean = false) = RecallDating(dayPrecision = true, zone = zone, inWords = inWords)
 
-        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId) = RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone))
+        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId, inWords: Boolean = false) =
+            RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone), inWords = inWords)
     }
 }
