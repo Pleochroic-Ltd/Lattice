@@ -285,6 +285,29 @@ class SceneNarratorTest {
     }
 
     @Test
+    fun `a scene between two named people is narrated by an observer, in the third person`() {
+        fun msg(pos: Long, role: org.foedusprogramme.lattice.ConversationMessage.Role, name: String?, text: String = "hi there") =
+            org.foedusprogramme.lattice.ConversationMessage(pos, role, text, java.time.Instant.EPOCH, speakerName = name)
+        val user = org.foedusprogramme.lattice.ConversationMessage.Role.USER
+        val assistant = org.foedusprogramme.lattice.ConversationMessage.Role.ASSISTANT
+        assertEquals(listOf("Caroline", "Melanie"), SceneNarrator.observedSpeakers(listOf(msg(1, user, "Caroline"), msg(2, user, "Melanie"), msg(3, user, "Caroline"))))
+        assertEquals(emptyList(), SceneNarrator.observedSpeakers(listOf(msg(1, user, "Caroline"), msg(2, assistant, null), msg(3, user, "Melanie"))), "the assistant speaks: its own memory")
+        assertEquals(emptyList(), SceneNarrator.observedSpeakers(listOf(msg(1, user, null), msg(2, assistant, null))), "LongMemEval's user and assistant")
+        assertEquals(emptyList(), SceneNarrator.observedSpeakers(listOf(msg(1, user, "Caroline"), msg(2, user, "Caroline"))), "one person is no conversation to observe")
+
+        val llm = Llm(mutableListOf("""{"narration":"Caroline told Melanie about the support group."}""", """{"faithful": true}"""))
+        val result = SceneNarrator(llm, SceneNarrator.Mode.SELF_CHECK).narrate(input().copy(observed = listOf("Caroline", "Melanie")))
+        assertIs<SceneNarrator.Result.Success>(result)
+        for ((_, user) in llm.calls) {
+            val who = user.substringAfter("## Who is who\n").substringBefore("\n\n")
+            assertEquals("You take no part in this chat: it is between Caroline and Melanie (each line names its speaker). Write about each of them in the third person, by name.", who.trim())
+        }
+        assertTrue("narrate as an observer" in SceneNarrator.SYSTEM_PROMPT)
+        assertTrue("the narration is an observer's" in SceneNarrator.SELF_CHECK_PROMPT.replace(Regex("\\s+"), " "))
+        assertEquals("A, B and C", SceneNarrator.observedList(listOf("A", "B", "C")))
+    }
+
+    @Test
     fun `self-check accepts first-person narration by the assistant and knows its names`() {
         val p = SceneNarrator.SELF_CHECK_PROMPT
         assertTrue("first person" in p, p)

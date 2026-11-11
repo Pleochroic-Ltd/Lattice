@@ -174,6 +174,26 @@ class PeriodFormerTest {
     }
 
     @Test
+    fun `scenes between two named people get an observer's who-is-who, others the assistant's`() {
+        val r = PeriodRig()
+        r.scene("陶艺课", rows = { c ->
+            r.source.at(r.at(day("2026-07-22"))).add(c, "I took my kids to a pottery class", speakerName = "Melanie")
+            r.source.add(c, "That sounds like so much fun!", speakerName = "Caroline")
+        })
+        r.formation.reply = FormationModel.continuing("陶艺的日子")
+        r.former().formChat(CHAT)
+        val who = r.formation.calls.last().substringAfter("## Who is who\n").substringBefore("\n\n")
+        assertEquals("You take no part in this chat: it is between Melanie and Caroline. Write about each of them in the third person, by name.", who.trim())
+        assertTrue("the gist names each of them in the third person" in PeriodFormer.SYSTEM_PROMPT.replace(Regex("\\s+"), " "))
+
+        val mine = PeriodRig()
+        mine.scene("温泉")
+        mine.formation.reply = FormationModel.continuing("温泉的日子")
+        mine.former().formChat(CHAT)
+        assertTrue(mine.formation.calls.last().contains("You — the assistant, written in the first person"), "the default rig has the assistant's lines")
+    }
+
+    @Test
     fun `realignCountedCurrent moves only an off-by-one reply that covers one past the new scenes`() {
         fun e(first: Int, last: Int, continues: Boolean = false) = PeriodFormer.Entry(continues, first, last, "n$first", null)
         fun realign(n: Int, vararg es: PeriodFormer.Entry, current: Boolean = true) =

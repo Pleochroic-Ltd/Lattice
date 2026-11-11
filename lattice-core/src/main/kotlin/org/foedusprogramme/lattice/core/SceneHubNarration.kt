@@ -210,6 +210,7 @@ internal class SceneHubNarration(
                 .getOrDefault(emptyList()),
             previousTitle = neighbours.getOrNull(index - 1)?.title?.takeIf { index > 0 },
             nextTitle = neighbours.getOrNull(index + 1)?.title?.takeIf { index >= 0 },
+            observed = SceneNarrator.observedSpeakers(messages),
         )
         val result = narrator.narrate(input)
         val hubId = when (result) {

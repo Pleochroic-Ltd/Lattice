@@ -558,7 +558,10 @@ class PeriodFormer(
             // A name its naming scenes no longer vouch for is not shown; uniqueness is still checked locally.
             val used = plan.kept.filter { it.id != plan.current?.id && shownName(it, snap, chatTrust) }
                 .flatMap { p -> listOf(p.name) + snap.aliases[p.id].orEmpty() }
-            PeriodFields.appendInputHeader(this, r.language, selfAliases, userName, counterpartFallback = "as named in the scenes", used)
+            PeriodFields.appendInputHeader(
+                this, r.language, selfAliases, userName, counterpartFallback = "as named in the scenes", used,
+                observed = observedSpeakers(plan.input),
+            )
             plan.current?.let { current ->
                 append('\n')
                 append("## Current period\n")
@@ -609,6 +612,17 @@ class PeriodFormer(
             }
         }
         return Prompt(text, shown)
+    }
+
+    /**
+     * The people of the new scenes when the assistant takes no part in any of them ([SceneNarrator.observedSpeakers]
+     * over all their messages); empty otherwise, or when a scene's messages can't be read.
+     */
+    private fun observedSpeakers(scenes: List<ChatScene>): List<String> {
+        val messages = runCatching {
+            scenes.flatMap { source.messages(it.record.conversationId, it.record.firstMessageId, it.record.lastMessageId) }
+        }.getOrElse { return emptyList() }
+        return SceneNarrator.observedSpeakers(messages)
     }
 
     /** Whether [period]'s name and gist may be shown (see [periodNameShown]). */
@@ -1167,6 +1181,8 @@ class PeriodFormer(
             - gist: one sentence (two at most) on what that stretch was, written as your own memory — first person
               for you, the human counterpart by name (see "Who is who"). No dates.
               At most 100 characters in Chinese or Japanese; in other languages at most 30 words.
+              When "Who is who" says you take no part in the chat, "the two of you" above means the people in it,
+              and the gist names each of them in the third person, never "I" or "we".
             - Write names and gists in the language given under "Language". Do not use 「」, 『』, the dot · or
               dashes (—, –, ～) in them: they are shown inside such marks.
             Output JSON only:

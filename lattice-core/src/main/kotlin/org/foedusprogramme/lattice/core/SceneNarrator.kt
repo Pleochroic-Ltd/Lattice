@@ -81,6 +81,11 @@ class SceneNarrator(
         /** Shown in both modes, as boundaries only (see the class doc). */
         val previousTitle: String? = null,
         val nextTitle: String? = null,
+        /**
+         * The people of a scene the assistant takes no part in ([observedSpeakers]): the narration is then an
+         * observer's, everyone in the third person by name. Empty = the assistant's own memory, in the first person.
+         */
+        val observed: List<String> = emptyList(),
     )
 
     /** A new thread set up in this scene, with the engram ids of its set-up memories and its short name (null = none). */
@@ -167,8 +172,8 @@ class SceneNarrator(
             dateRange(input)?.let { append("Dates: ").append(it).append('\n') }
             appendNeighbours(input)
             append('\n')
-            // The narration speaks as the assistant ("我"): the checker must know who that is.
-            appendWhoIsWho()
+            // The narration speaks as the assistant ("我"), or as an observer: the checker must know which.
+            appendWhoIsWho(input.observed)
             append('\n')
             append("## Memories\n")
             input.members.forEach { append('[').append(it.ref).append("] ").append(it.content.trim()).append('\n') }
@@ -249,7 +254,7 @@ class SceneNarrator(
         if (input.inProgress) append("Status: still in progress — narrate what has happened so far.\n")
         appendNeighbours(input)
         append('\n')
-        appendWhoIsWho()
+        appendWhoIsWho(input.observed)
         append("\n## Memories of this scene\n")
         input.members.forEach { append('[').append(it.ref).append("] ").append(it.content.trim()).append('\n') }
         if (input.candidateThreads.isNotEmpty()) {
@@ -289,8 +294,14 @@ class SceneNarrator(
      * Who "我" is and who the human counterpart is, in the input rather than the system prompt (which stays
      * byte-stable across deployments). Names only when configured; nothing is invented.
      */
-    private fun StringBuilder.appendWhoIsWho() {
+    private fun StringBuilder.appendWhoIsWho(observed: List<String>) {
         append("## Who is who\n")
+        if (observed.isNotEmpty()) {
+            // Two (or more) named people talking, no assistant line: there is no "I" in this scene to speak as.
+            append("You take no part in this chat: it is between ").append(observedList(observed))
+                .append(" (each line names its speaker). Write about each of them in the third person, by name.\n")
+            return
+        }
         append("You — the assistant, written in the first person")
         val aliases = selfAliases.map { it.trim() }.filter { it.isNotEmpty() }
         if (aliases.isNotEmpty()) append("; also addressed as ").append(aliases.joinToString(", ")).append(" (all of these are you)")
@@ -347,6 +358,8 @@ class SceneNarrator(
               or "the model", in any language, and never by the names listed as yours in "Who is who" (those
               names are you; only keep one when the scene is about the name itself). Name the human counterpart
               by the name given there. Keep one voice from start to end.
+              When "Who is who" says you take no part in the chat (other people talking), narrate as an observer
+              instead: each person in the third person, by name, never "I" or "we" for any of them.
             - When the participants step into together a shared imagined scene or world — an imagined situation
               opened on purpose (e.g. "close your eyes…", a shared make-believe world, "pretend we're at the
               seaside") — and carry on inside it, narrate what happens there directly as
@@ -406,7 +419,9 @@ class SceneNarrator(
             added from elsewhere, no wrong place, person or outcome, nobody's words or acts given to someone else.
             The narration is the assistant's own memory, written in the first person: "I" is the
             assistant, who is also addressed by the names under "Who is who". Narrating the assistant's words or
-            acts in the first person is correct attribution, not a reason to veto.
+            acts in the first person is correct attribution, not a reason to veto. When "Who is who" says the
+            assistant takes no part in the chat, the narration is an observer's, every person in the third person
+            by name: that is correct, and an "I" or "we" standing for one of them is a reason to veto.
             When the participants stepped together into a shared imagined scene or world (an imagined situation
             opened on purpose: "close your eyes…", a shared make-believe world, "pretend we're at the seaside"), telling
             what happened inside it as lived experience, without calling it imagined or role-play, is the
@@ -449,6 +464,22 @@ class SceneNarrator(
             val m = LEADING_DATE.find(narration) ?: return narration
             return narration.substring(m.range.last + 1).trim()
         }
+
+        /**
+         * The people of a stretch of chat the assistant takes no part in: the distinct speaker names of its said
+         * messages when none is the assistant's and at least two people are named (LoCoMo's two friends, a group chat
+         * the assistant only listens to); else empty, and the narration is the assistant's own, as always.
+         */
+        fun observedSpeakers(messages: List<org.foedusprogramme.lattice.ConversationMessage>): List<String> {
+            val said = messages.filter { it.said }
+            if (said.isEmpty() || said.any { it.role == org.foedusprogramme.lattice.ConversationMessage.Role.ASSISTANT }) return emptyList()
+            val names = said.mapNotNull { m -> m.speakerName?.trim()?.takeIf { it.isNotEmpty() } }.distinct()
+            return if (names.size >= 2) names else emptyList()
+        }
+
+        /** "A and B", "A, B and C". */
+        internal fun observedList(names: List<String>): String =
+            if (names.size <= 1) names.joinToString() else names.dropLast(1).joinToString(", ") + " and " + names.last()
 
         /** Max whitespace-separated words in a thread name (non-CJK languages). */
         const val MAX_THREAD_NAME_WORDS = 6

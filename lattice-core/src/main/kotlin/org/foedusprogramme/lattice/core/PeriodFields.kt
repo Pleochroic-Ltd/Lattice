@@ -228,17 +228,30 @@ object PeriodFields {
         userName: String?,
         counterpartFallback: String,
         usedNames: List<String>,
+        /** The people of a chat the assistant takes no part in ([SceneNarrator.observedSpeakers]); empty = none. */
+        observed: List<String> = emptyList(),
     ) {
         out.append("## Language\n")
         out.append(language?.let(::languageLabel) ?: "the conversation's dominant language").append('\n')
         out.append('\n')
         out.append("## Who is who\n")
+        if (observed.isNotEmpty()) {
+            out.append("You take no part in this chat: it is between ").append(SceneNarrator.observedList(observed))
+                .append(". Write about each of them in the third person, by name.\n")
+            out.append('\n')
+            appendUsedNames(out, usedNames)
+            return
+        }
         out.append("You — the assistant, written in the first person")
         val aliases = selfAliases.map { it.trim() }.filter { it.isNotEmpty() }
         if (aliases.isNotEmpty()) out.append("; also addressed as ").append(aliases.joinToString(", ")).append(" (all of these are you)")
         out.append('\n')
         out.append("The human counterpart: ").append(userName?.trim()?.takeIf { it.isNotEmpty() } ?: counterpartFallback).append('\n')
         out.append('\n')
+        appendUsedNames(out, usedNames)
+    }
+
+    private fun appendUsedNames(out: StringBuilder, usedNames: List<String>) {
         out.append("## Names already used\n")
         val used = usedNames.map(::normalize).filter { it.isNotEmpty() }.distinct()
         out.append(if (used.isEmpty()) "(none)" else used.joinToString("、") { "「$it」" }).append('\n')
