@@ -2,10 +2,12 @@ package org.foedusprogramme.lattice.core
 
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.time.format.DateTimeParseException
 import java.time.temporal.ChronoUnit
+import kotlin.math.abs
 
 /**
  * Renders spreading-activation recall hits into the memory block injected into the prompt. Each hit shows its gist;
@@ -154,7 +156,7 @@ object RecallFormatter {
         // without scenes, threads, periods or said / due tags is unchanged). It lives inside the recall block rather
         // than a static system prompt so a cached prompt prefix never changes, and it is in the turn's language, like
         // the markers it explains. The block never holds a blank line: the tags are single-line.
-        val legend = markers.legend(sawScene, sawThread, sawPeriod, sawDates, labelled) ?: return body
+        val legend = markers.legend(sawScene, sawThread, sawPeriod, sawDates, labelled, relative = labelled && dating.relative) ?: return body
         // In words, a said date also says what a relative time inside the memory counts from: a reader took
         // "three days ago" from today, or from the event date, and counted it twice.
         val relative = when {
@@ -266,11 +268,22 @@ object RecallFormatter {
         fun relative(day: LocalDate): String? =
             turnEnd?.let { markers.relativeTime(ChronoUnit.DAYS.between(day, LocalDate.ofInstant(it.now, it.zone))) }
         val eventDay = e.eventDate?.let(::fullDay)
-        e.eventDate?.let { parts += markers.happened(markers.partial(it, shownDate(it, dating, markers))) }
+        val said = saidDays(e, dating.saidZone(), enabled = true)
+        e.eventDate?.let { event ->
+            val shown = markers.partial(event, shownDate(event, dating, markers))
+            when {
+                !dating.relative -> parts += markers.happened(shown)
+                // Mention-anchored: a month-only date in the month of the first mention says no more than the mention,
+                // and beside it a reader took the 1st of the month for the day.
+                sameMonthAsMention(event, said) -> Unit
+                // A state that has lasted "for three months" by the mention began then: since, not happened.
+                ongoingSince(e.content, event, said) -> parts += markers.since(shown)
+                else -> parts += markers.happened(shown)
+            }
+        }
         eventDay?.let { day -> relative(day)?.let { parts += it } }
         e.dueDate?.let { parts += markers.dueLabelled(shownDate(it, dating, markers)) }
         outcome(e, dating, markers, lookup)?.let { parts += it }
-        val said = saidDays(e, dating.saidZone(), enabled = true)
         if (said != null) {
             val (from, to) = said
             parts += if (dating.inWords) markers.mentioned(markers.saidDay(from), markers.saidDay(to)) else markers.mentioned(from.toString(), to.toString())
@@ -278,6 +291,60 @@ object RecallFormatter {
         }
         return if (parts.isEmpty()) "" else "[${parts.joinToString(" · ")}] "
     }
+
+    /** A month-only [event] date in the month of the first mention ([said]): it adds nothing to the mention. */
+    private fun sameMonthAsMention(event: String, said: Pair<LocalDate, LocalDate>?): Boolean {
+        if (said == null || !ISO_MONTH.matches(event.trim())) return false
+        return said.first.toString().startsWith(event.trim())
+    }
+
+    /**
+     * Whether [content] tells a state that had lasted some time when it was first mentioned ("has been living in
+     * Harajuku for three months", "has been doing yoga for about 6 weeks") and [event] is where that time began: the
+     * first mention minus the duration, at the event date's own precision, give or take one unit (a month-only date one
+     * month, a year-only one year, a day a quarter of the duration and at least three days). English wording only; any
+     * other memory keeps its `happened:`.
+     */
+    internal fun ongoingSince(content: String, event: String, said: Pair<LocalDate, LocalDate>?): Boolean {
+        if (said == null || !ONGOING.containsMatchIn(content)) return false
+        val m = DURATION.find(content) ?: return false
+        val count = m.groups[2]?.value?.lowercase()?.let { COUNT_WORDS[it] ?: it.toIntOrNull() }
+            ?: if (m.groups[1] != null) 1 else return false
+        if (count <= 0) return false
+        val unit = m.groups[3]!!.value.lowercase()
+        val start = when (unit) {
+            "day" -> said.first.minusDays(count.toLong())
+            "week" -> said.first.minusWeeks(count.toLong())
+            "month" -> said.first.minusMonths(count.toLong())
+            else -> said.first.minusYears(count.toLong())
+        }
+        val e = event.trim()
+        return when {
+            ISO_YEAR.matches(e) -> abs(e.toInt() - start.year) <= 1
+            ISO_MONTH.matches(e) -> {
+                val ym = runCatching { YearMonth.parse(e) }.getOrNull() ?: return false
+                abs(ChronoUnit.MONTHS.between(ym, YearMonth.from(start))) <= 1
+            }
+            else -> {
+                val day = fullDay(e) ?: return false
+                val span = ChronoUnit.DAYS.between(start, said.first)
+                abs(ChronoUnit.DAYS.between(day, start)) <= maxOf(3L, span / 4)
+            }
+        }
+    }
+
+    private val ONGOING = Regex("""\b(?:has|have|had|'s|’s)\s+(?:been|lived|had|owned|used|worked|known|played|kept|run)\b""", RegexOption.IGNORE_CASE)
+    private val DURATION = Regex(
+        """\b(?:for|over)\s+(?:the\s+)?(?:(past|last)\s+)?(?:about\s+|around\s+|roughly\s+|nearly\s+|almost\s+|over\s+|more than\s+|just over\s+)?""" +
+            """(?:(\d{1,3}|an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|a few|several|a couple of)\s+)?(day|week|month|year)s?\b""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val COUNT_WORDS = mapOf(
+        "a" to 1, "an" to 1, "one" to 1, "two" to 2, "three" to 3, "four" to 4, "five" to 5, "six" to 6, "seven" to 7,
+        "eight" to 8, "nine" to 9, "ten" to 10, "eleven" to 11, "twelve" to 12, "a few" to 3, "several" to 3, "a couple of" to 2,
+    )
+    private val ISO_MONTH = Regex("\\d{4}-\\d{2}")
+    private val ISO_YEAR = Regex("\\d{4}")
 
     /**
      * When a set-up of a closed thread was settled, from its RESOLVE memories in thread order: the first one's event
@@ -433,11 +500,20 @@ data class RecallDating(
      * precision only.
      */
     val labels: Boolean = false,
+    /**
+     * Labelled tags anchored to the mention: a month-only `happened:` date in the month of the first mention is left
+     * out (it says no more than the mention, and beside it a reader took the 1st of the month for the day), a memory of
+     * a state that had lasted some time when mentioned dates its start as `since:` ("has been living there for three
+     * months" with July as its date), and the legend says a partial date is on or before the mention rather than
+     * overruled by it. Only the rendering changes. Off = the labelled tags, byte for byte. With [labels] only.
+     */
+    val relative: Boolean = false,
 ) {
     init {
         require(turnEnd == null || dayPrecision) { "a turn-end recall shows the day" }
         require(!inWords || dayPrecision) { "dates in words come with day precision" }
         require(!labels || dayPrecision) { "labelled dates come with day precision" }
+        require(!relative || labels) { "mention-anchored dates are labelled dates" }
     }
 
     /** The render-time context of a turn-end recall: the turn's chat, the clock and the runtime zone. */
@@ -448,10 +524,10 @@ data class RecallDating(
         val ABSOLUTE = RecallDating(dayPrecision = true)
 
         /** [ABSOLUTE] reading said spans in [zone] (the runtime zone), dates [inWords] or ISO, [labels] or not. */
-        fun absolute(zone: ZoneId, inWords: Boolean = false, labels: Boolean = false) =
-            RecallDating(dayPrecision = true, zone = zone, inWords = inWords, labels = labels)
+        fun absolute(zone: ZoneId, inWords: Boolean = false, labels: Boolean = false, relative: Boolean = false) =
+            RecallDating(dayPrecision = true, zone = zone, inWords = inWords, labels = labels, relative = relative)
 
-        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId, inWords: Boolean = false, labels: Boolean = false) =
-            RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone), inWords = inWords, labels = labels)
+        fun turnEnd(chatKey: String?, now: Instant, zone: ZoneId, inWords: Boolean = false, labels: Boolean = false, relative: Boolean = false) =
+            RecallDating(dayPrecision = true, turnEnd = TurnEnd(chatKey, now, zone), inWords = inWords, labels = labels, relative = relative)
     }
 }

@@ -105,6 +105,13 @@ class RecallMarkers private constructor(
     /** When the event itself happened: `happened: 2021 (year only)`. [date] is as shown, with [partial] applied. */
     fun happened(date: String): String = fill("lattice.recall.date.happened", "date" to date)
 
+    /**
+     * When a state still going on at the mention began ([RecallDating.relative]): `since: July 2023 (month only)`, for a
+     * memory that says how long it has lasted ("has been living in Harajuku for three months"). [date] is as shown, with
+     * [partial] applied.
+     */
+    fun since(date: String): String = fill("lattice.recall.date.since", "date" to date)
+
     /** When a memory came up in the conversation: `mentioned: Wed 20 April 2022` (one day, or first..latest). */
     fun mentioned(from: String, to: String): String =
         fill("lattice.recall.date.mentioned", "span" to if (from == to) from else from + spanSeparator + to)
@@ -138,6 +145,13 @@ class RecallMarkers private constructor(
     /** The dates legend of a block whose tags are labelled: alone, or appended to another legend on the same line. */
     val legendDatesLabelled: String by lazy { string("lattice.recall.legend.dates_labelled") }
     val legendDatesLabelledSuffix: String by lazy { string("lattice.recall.legend.dates_labelled_suffix") }
+
+    /**
+     * The dates legend of a block whose labelled tags are anchored to the mention ([RecallDating.relative]): a partial
+     * `happened:` date is on or before the mention, not overruled by it, and `since:` dates an ongoing state.
+     */
+    val legendDatesRelative: String by lazy { string("lattice.recall.legend.dates_relative") }
+    val legendDatesRelativeSuffix: String by lazy { string("lattice.recall.legend.dates_relative_suffix") }
 
     /** [legendRelativeSuffix] for labelled tags: a relative time counts from the day mentioned, in a quote the day said. */
     val legendRelativeLabelledSuffix: String by lazy { string("lattice.recall.legend.relative_labelled_suffix") }
@@ -231,14 +245,23 @@ class RecallMarkers private constructor(
 
     /**
      * [legend] plus, when the block shows said / due tags, their explanation on the same line; [labelled] explains the
-     * labelled tags ([RecallDating.labels]) instead.
+     * labelled tags ([RecallDating.labels]) instead, and [relative] (with [labelled]) the mention-anchored ones
+     * ([RecallDating.relative]).
      */
-    fun legend(scene: Boolean, thread: Boolean, period: Boolean, dates: Boolean, labelled: Boolean = false): String? {
+    fun legend(scene: Boolean, thread: Boolean, period: Boolean, dates: Boolean, labelled: Boolean = false, relative: Boolean = false): String? {
         val base = legend(scene, thread, period)
         return when {
             !dates -> base
-            base == null -> if (labelled) legendDatesLabelled else legendDates
-            else -> base + if (labelled) legendDatesLabelledSuffix else legendDatesSuffix
+            base == null -> when {
+                labelled && relative -> legendDatesRelative
+                labelled -> legendDatesLabelled
+                else -> legendDates
+            }
+            else -> base + when {
+                labelled && relative -> legendDatesRelativeSuffix
+                labelled -> legendDatesLabelledSuffix
+                else -> legendDatesSuffix
+            }
         }
     }
 

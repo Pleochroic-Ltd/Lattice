@@ -47,6 +47,13 @@ data class LatticeSettings(
      * unlabelled tags (`[2021 · said Wed 20 April 2022]`), byte for byte.
      */
     val recallDateLabels: Boolean = true,
+    /**
+     * With [recallDateLabels], the labelled tags are anchored to the mention: a month-only `happened:` date in the
+     * month of the first mention is left out, a memory of a state that had lasted some time when mentioned ("has been
+     * living there for three months") dates its start as `since:`, and the legend says a partial date is on or before
+     * the mention instead of being overruled by it. Only the rendering changes. false = the labelled tags, byte for byte.
+     */
+    val recallDatesRelative: Boolean = false,
     val graphReadTimeout: Duration = 15.seconds,
     val shutdownTimeout: Duration = 30.seconds,
     /** Most model-judged pairs a sleep reviews. */

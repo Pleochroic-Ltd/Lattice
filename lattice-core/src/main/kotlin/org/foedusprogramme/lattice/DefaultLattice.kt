@@ -355,10 +355,11 @@ internal class DefaultLattice(
         val markers = markerCache.getOrPut(language) { RecallMarkers.of(texts, language) }
         // Scene episodes on: a search result may be stored, so it shows absolute days only; the per-turn block rides
         // that turn alone, so it also shows how long ago and the period.
+        val relativeDates = settings.recallDateLabels && settings.recallDatesRelative
         val dating = when {
             !sceneEpisodes -> RecallDating.LEGACY
-            explicit -> RecallDating.absolute(zone, settings.recallDatesInWords, settings.recallDateLabels)
-            else -> RecallDating.turnEnd(options.chatKey, now(), zone, settings.recallDatesInWords, settings.recallDateLabels)
+            explicit -> RecallDating.absolute(zone, settings.recallDatesInWords, settings.recallDateLabels, relativeDates)
+            else -> RecallDating.turnEnd(options.chatKey, now(), zone, settings.recallDatesInWords, settings.recallDateLabels, relativeDates)
         }
         onGraphBounded { g ->
             val hits = dispatchTemporal(g, cue, options.limit ?: if (explicit) settings.searchLimit else settings.retrievalLimit, reinforce, applyEmitGate = !explicit, allowAggregative = explicit)

@@ -50,6 +50,9 @@ class BundledTextsTest {
             recall.legendRelativeLabelledSuffix
             recall.legend(scene = false, thread = false, period = false, dates = true, labelled = true)
             recall.legend(scene = true, thread = false, period = false, dates = true, labelled = true)
+            recall.since(recall.partial("2026-01", "2026-01"))
+            recall.legend(scene = false, thread = false, period = false, dates = true, labelled = true, relative = true)
+            recall.legend(scene = true, thread = false, period = false, dates = true, labelled = true, relative = true)
             recall.isoInWords("2026-01-03")
             recall.isoInWords("2026-01")
             recall.isoInWords("2026")

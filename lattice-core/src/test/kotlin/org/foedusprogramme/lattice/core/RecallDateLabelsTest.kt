@@ -231,6 +231,94 @@ class RecallDateLabelsTest {
         kotlin.test.assertFailsWith<IllegalArgumentException> { RecallDating(labels = true) }
     }
 
+    // --- relative: labelled tags anchored to the mention --------------------------------------------------------------
+
+    private val wordsRelative = RecallDating.absolute(ZoneOffset.UTC, inWords = true, labels = true, relative = true)
+
+    /**
+     * The LongMemEval nr4 misreadings: "just launched" tagged `happened: February 2023 (month only)` beside a mention of
+     * 10 February was counted from the 1st; "has been living in Harajuku for three months" tagged `happened: July 2023`
+     * was read as three months as of July.
+     */
+    @Test
+    fun `a month-only date in the month of the mention is left out`() {
+        val launch = engram("User just launched their website", eventDate = "2023-02", said = "2023-02-10")
+        assertEquals("- [mentioned: Fri 10 February 2023] User just launched their website", format(listOf(launch), dating = wordsRelative).lines().first())
+        assertEquals(
+            "- [happened: February 2023 (month only) · mentioned: Fri 10 February 2023] User just launched their website",
+            format(listOf(launch)).lines().first(),
+            "labelled without relative: as before",
+        )
+        // Another month, a day, a year: shown as before.
+        val f = Fixture()
+        assertEquals("- [happened: February 2022 (month only) · mentioned: Sun 27 March 2022] John resumed playing drums", format(listOf(f.drums), dating = wordsRelative).lines().first())
+        val day = engram("User bought a rug", eventDate = "2023-02-03", said = "2023-02-10")
+        assertEquals("- [happened: 3 February 2023 · mentioned: Fri 10 February 2023] User bought a rug", format(listOf(day), dating = wordsRelative).lines().first())
+        val year = engram("User got miles", eventDate = "2023", said = "2023-05-29")
+        assertEquals("- [happened: 2023 (year only) · mentioned: Mon 29 May 2023] User got miles", format(listOf(year), dating = wordsRelative).lines().first())
+        // Mentioned over several months: the first mention decides.
+        val span = engram("User started a blog", eventDate = "2023-02", said = "2023-02-10", saidTo = "2023-04-01")
+        assertEquals("- [mentioned: Fri 10 February 2023 to Sat 1 April 2023] User started a blog", format(listOf(span), dating = wordsRelative).lines().first())
+        // Undated by mention: nothing to anchor to, so the date stays.
+        assertEquals("- [happened: February 2023 (month only)] x", format(listOf(engram("x", eventDate = "2023-02")), dating = wordsRelative).lines().first())
+    }
+
+    @Test
+    fun `a state that had lasted some time when mentioned dates its start as since`() {
+        fun line(content: String, event: String, said: String, markers: RecallMarkers = en) =
+            format(listOf(engram(content, eventDate = event, said = said)), markers = markers, dating = wordsRelative).lines().first()
+        assertEquals(
+            "- [since: July 2023 (month only) · mentioned: Sun 15 October 2023] User has been living in Harajuku for three months",
+            line("User has been living in Harajuku for three months", "2023-07", "2023-10-15"),
+        )
+        assertEquals(
+            "- [since: January 2023 (month only) · mentioned: Thu 20 April 2023] User has been taking fitness classes for the past three months",
+            line("User has been taking fitness classes for the past three months", "2023-01", "2023-04-20"),
+        )
+        assertEquals(
+            "- [since: 12 June 2023 · mentioned: Mon 24 July 2023] User has been doing Hatha yoga for about 6 weeks",
+            line("User has been doing Hatha yoga for about 6 weeks", "2023-06-12", "2023-07-24"),
+        )
+        assertEquals(
+            "- [since: 2022 (year only) · mentioned: Sat 27 May 2023] User has had their dog for a year",
+            line("User has had their dog for a year", "2022", "2023-05-27"),
+        )
+        // Not a lasting state, or a start that the duration doesn't give: happened, as before.
+        assertEquals(
+            "- [happened: July 2023 (month only) · mentioned: Sun 15 October 2023] User went to Japan for two weeks",
+            line("User went to Japan for two weeks", "2023-07", "2023-10-15"),
+        )
+        assertEquals(
+            "- [happened: July 2023 (month only) · mentioned: Sun 15 October 2023] User has been playing guitar for three years",
+            line("User has been playing guitar for three years", "2023-07", "2023-10-15"),
+        )
+        assertEquals(
+            "- [happened: July 2023 (month only) · mentioned: Sun 15 October 2023] User has been playing guitar for years",
+            line("User has been playing guitar for years", "2023-07", "2023-10-15"),
+        )
+        assertEquals(
+            "- [始于：2023年7月（仅知月份） · 提到：2023年10月15日（周日）] User has been living in Harajuku for three months",
+            line("User has been living in Harajuku for three months", "2023-07", "2023-10-15", markers = zh),
+        )
+    }
+
+    @Test
+    fun `relative changes only those tags and the legend`() {
+        val f = Fixture()
+        val labelled = format(f.hits, f.lookup).lines()
+        val relative = format(f.hits, f.lookup, dating = wordsRelative).lines()
+        assertEquals(labelled.dropLast(1), relative.dropLast(1), "no fixture memory is in its mention's month or a lasting state")
+        assertEquals(en.legendSceneAndThread + en.legendDatesRelativeSuffix + en.legendRelativeLabelledSuffix, relative.last())
+        assertEquals(en.legendDatesRelative + en.legendRelativeLabelledSuffix, format(listOf(f.italy), dating = wordsRelative).lines().last())
+        for (label in listOf("\"happened: …\"", "(year only)", "(month only)", "\"since: …\"", "\"mentioned: …\"", "\"due: …\"", "\"resolved: …\"", "\"said: …\"")) {
+            assertTrue(label in en.legendDatesRelative && label in en.legendDatesRelativeSuffix, label)
+        }
+        assertTrue("on or before" in en.legendDatesRelative && "on or before" in en.legendDatesRelativeSuffix)
+        assertFalse("not the date of the event" in en.legendDatesRelative || "not the event's date" in en.legendDatesRelativeSuffix)
+        assertTrue("始于" in zh.legendDatesRelative && "始于" in zh.legendDatesRelativeSuffix)
+        kotlin.test.assertFailsWith<IllegalArgumentException> { RecallDating.absolute(ZoneOffset.UTC, inWords = true, relative = true) }
+    }
+
     // --- off: the block as before -------------------------------------------------------------------------------------
 
     /**
