@@ -77,7 +77,7 @@ class DefaultLatticeCaptureTest {
         val transcript = Transcript((1..30).map { line(it) })
 
         assertFailsWith<UnparseableExtractionException> { lattice.capture(transcript) }
-        assertEquals(3, model.calls(MemoryTask.EXTRACT), "30 lines are three chunks of at most 12")
+        assertEquals(4, model.calls(MemoryTask.EXTRACT), "30 lines are three chunks of at most 12; the poison one is asked twice")
         assertEquals(1, cap.entries.size)
         assertEquals(2, lattice.stats().engrams, "the other two chunks were ingested")
         lattice.close()

@@ -102,13 +102,57 @@ class NativeMemoryExtractorTest {
     }
 
     @Test
-    fun `memories without a ref or content are dropped, missing fields take their defaults`() {
-        val e = NativeMemoryExtractor.parse("""{"memories":[{"ref":"","content":"x"},{"ref":"m","content":" "},{"ref":"k","content":" kept ","salience":7}]}""")!!
+    fun `memories without content are dropped, missing fields take their defaults`() {
+        val e = NativeMemoryExtractor.parse("""{"memories":[{"ref":"m","content":" "},{"ref":"k","content":" kept ","salience":7}]}""")!!
         val m = e.memories.single()
         assertEquals("kept", m.content)
         assertEquals(1.0, m.salience, "salience is clamped")
         assertEquals(Engram.Layer.EPISODIC, m.layer)
         assertTrue(e.relations.isEmpty())
+    }
+
+    @Test
+    fun `a memory without a ref is kept under its place's ref, never one already taken`() {
+        // The captured shape: every memory without `ref`, relations numbered as the prompt's shape numbers them.
+        val all = NativeMemoryExtractor.parse("""{"memories":[{"content":"甲"},{"ref":"","content":"乙"},{"ref":7,"content":"丙"}],
+            "relations":[{"from":"m2","to":"m1","type":"SUPERSEDES"}]}""")!!
+        assertEquals(listOf("m1" to "甲", "m2" to "乙", "7" to "丙"), all.memories.map { it.ref to it.content })
+        assertEquals(listOf(ExtractedRelation("m2", "m1", Edge.Type.SUPERSEDES)), all.relations)
+        val some = NativeMemoryExtractor.parse("""{"memories":[{"ref":"m2","content":"甲"},{"content":"乙"}]}""")!!
+        assertEquals(listOf("m2", "#2"), some.memories.map { it.ref })
+    }
+
+    /** Answers [replies] in turn, the last one from then on, and counts the calls. */
+    private class SequenceModel(private vararg val replies: String) : MemoryModel {
+        var calls = 0
+        override fun complete(task: MemoryTask, system: String, user: String): String = replies[minOf(calls++, replies.lastIndex)]
+    }
+
+    @Test
+    fun `a reply that does not parse is asked once more, and a second one is poison`() {
+        val good = """{"memories":[{"ref":"m1","content":"kept"}]}"""
+        val once = SequenceModel("```json\n{\"memories\": [{\"ref\": \"m1\", \"content\": \"cut", good)
+        assertEquals("kept", NativeMemoryExtractor(once).extract("[user] hi").memories.single().content)
+        assertEquals(2, once.calls)
+        val twice = SequenceModel("not json", "still not json", good)
+        val thrown = assertFailsWith<UnparseableExtractionException> { NativeMemoryExtractor(twice).extract("[user] hi") }
+        assertEquals(2, twice.calls)
+        assertEquals("still not json", thrown.rawOutput)
+    }
+
+    @Test
+    fun `a reply that lists memories and keeps none is asked once more, an empty one is not`() {
+        val hollow = """{"memories":[{"ref":"m1","content":""}]}"""
+        val good = """{"memories":[{"ref":"m1","content":"kept"}]}"""
+        val retried = SequenceModel(hollow, good)
+        assertEquals("kept", NativeMemoryExtractor(retried).extract("[user] hi").memories.single().content)
+        assertEquals(2, retried.calls)
+        val stays = SequenceModel(hollow)
+        assertTrue(NativeMemoryExtractor(stays).extract("[user] hi").memories.isEmpty())
+        assertEquals(2, stays.calls)
+        val empty = SequenceModel("""{"memories":[],"relations":[]}""", good)
+        assertTrue(NativeMemoryExtractor(empty).extract("[user] hi").memories.isEmpty())
+        assertEquals(1, empty.calls)
     }
 
     @Test

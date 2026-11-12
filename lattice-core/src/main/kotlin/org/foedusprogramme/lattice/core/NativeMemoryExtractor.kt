@@ -61,7 +61,7 @@ class NativeMemoryExtractor(
      * into the STRUCTURED `event_date`, not into the memory content. The line also names the weekday. Otherwise the transcript is sent as it is
      * (in-transcript-anchored relatives still resolve without any external clock).
      *
-     * Throws [UnparseableExtractionException] when a reply is not parseable JSON (a deterministic, poison-window
+     * Throws [UnparseableExtractionException] when a reply, asked twice, is not parseable JSON (a poison-window
      * failure), and lets the model's own exceptions ([MemoryModelUnavailableException] and the rest) through
      * unchanged: an outage must never be mistaken for poison.
      */
@@ -82,12 +82,21 @@ class NativeMemoryExtractor(
     }
 
     private fun extractOne(transcript: String, referenceTime: Instant?): Extraction {
-        val raw = model.complete(MemoryTask.EXTRACT, systemPrompt, withReferenceTime("$whoIsWho\n\n$transcript", referenceTime))
+        val user = withReferenceTime("$whoIsWho\n\n$transcript", referenceTime)
+        var raw = model.complete(MemoryTask.EXTRACT, systemPrompt, user)
+        var extraction = parse(raw, assistantSpeakers)
+        // A reply that does not parse, or lists memories and keeps none of them, is asked once more: both are mostly a
+        // sampling slip (a body cut short, every memory missing its content), and a chunk lost to one is lost for good
+        // when nothing retries it (capture without scenes). A second slip stands.
+        if (extraction == null || extraction.memories.isEmpty() && listsMemories(raw)) {
+            raw = model.complete(MemoryTask.EXTRACT, systemPrompt, user)
+            extraction = parse(raw, assistantSpeakers)
+        }
         // A null parse is a DETERMINISTIC failure (poison window), distinct from a valid empty result AND from a
         // transient backend outage, so a caller can count only poison toward a dead-letter cap. The RAW output rides
         // on the exception so the caller can dead-letter it: a refusal, a preamble or a JSON body truncated at the
         // output-token ceiling is only diagnosable if what the model said is kept.
-        return parse(raw, assistantSpeakers)
+        return extraction
             ?: throw UnparseableExtractionException("memory extraction: model output was not parseable JSON", raw)
     }
 
@@ -388,11 +397,17 @@ class NativeMemoryExtractor(
         fun parse(raw: String, assistantSpeakers: Set<String> = emptySet()): Extraction? {
             val root = parseLenientObject(raw) ?: return null
 
-            val memories = root["memories"]?.jsonArray.orEmptyArray().mapNotNull { node ->
+            val nodes = root["memories"]?.jsonArray.orEmptyArray()
+            val given = nodes.mapNotNullTo(HashSet()) { refOf(it.jsonObject) }
+            val memories = nodes.mapIndexedNotNull { i, node ->
                 val obj = node.jsonObject
-                val ref = obj["ref"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                // A memory the model gave no ref is kept under the ref its place would have had ("m3", as the prompt's
+                // shape numbers them), so relations written that way still find it. Dropping it lost whole chunks:
+                // about one reply in 40 leaves `ref` out of every memory. A ref another memory already has is not
+                // taken.
+                val ref = refOf(obj) ?: "m${i + 1}".takeIf { it !in given } ?: "#${i + 1}"
                 val content = obj["content"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-                if (ref.isBlank() || content.isBlank()) return@mapNotNull null
+                if (content.isBlank()) return@mapIndexedNotNull null
                 // The structured event date, validated to ISO YYYY(-MM(-DD)). A non-conforming or absent value
                 // is dropped to null (never fabricated or stamped into content). A non-STRING JSON value must
                 // NOT throw — `.jsonPrimitive` raises on a non-primitive and would bypass poison-window
@@ -449,6 +464,12 @@ class NativeMemoryExtractor(
             }
             return Extraction(memories, relations)
         }
+
+        private fun refOf(obj: JsonObject): String? = (obj["ref"] as? JsonPrimitive)?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
+
+        /** Whether [raw] parses to an object whose `memories` list is not empty, whatever its entries hold. */
+        internal fun listsMemories(raw: String): Boolean =
+            (parseLenientObject(raw)?.get("memories") as? JsonArray)?.isNotEmpty() == true
 
         /**
          * The lenient JSON-object read shared by the side-model memory calls (extraction, scene segmentation):
