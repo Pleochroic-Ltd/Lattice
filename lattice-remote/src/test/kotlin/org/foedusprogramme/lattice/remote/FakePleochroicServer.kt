@@ -27,7 +27,7 @@ import java.util.TreeMap
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
- * standalone-service's Lattice endpoints in memory, as `docs/API.md` describes them: graphs as an op log compacted per
+ * The Pleochroic service's Lattice endpoints in memory: graphs as an op log compacted per
  * record, snapshots, `409` on a stale `baseSeq`, `410 snapshot_required` past the log's start, embeddings and memory
  * completions. Test hooks: [down] answers `503`, [failNextOps] fails the next posts, [rejectNextOps] refuses them as
  * malformed, [compact] drops the log up to now, and [requests] lists what was asked.

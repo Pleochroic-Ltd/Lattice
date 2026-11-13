@@ -39,7 +39,7 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * A [LatticeStore] kept on Pleochroic as an op log (`docs/API.md` "Lattice" in standalone-service), with the whole
+ * A [LatticeStore] kept on Pleochroic as an op log (the service's Lattice API), with the whole
  * graph mirrored in memory ([InMemoryLatticeStore]): the mirror checks every constraint and works out every cascade,
  * each row it writes or deletes goes out as one op (`WIRE.md`), and [load] is served from it.
  *

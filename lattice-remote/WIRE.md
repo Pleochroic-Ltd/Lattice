@@ -1,6 +1,6 @@
 # Lattice graph ops on the wire
 
-How `PleochroicGraphStore` writes a Lattice graph into standalone-service's graph storage (`docs/API.md`, "Lattice").
+How `PleochroicGraphStore` writes a Lattice graph into the Pleochroic graph store's Lattice API.
 The encoding lives in one place, `GraphWire.kt`; this file documents it for the server side and for other clients.
 
 ## Conventions
@@ -27,7 +27,7 @@ The encoding lives in one place, `GraphWire.kt`; this file documents it for the 
 
 An edge is directed: `a` is `EdgeRecord.from`, `b` is `EdgeRecord.to` (parent → child, hub → member, newer → older).
 It is keyed by the **unordered** pair: a `putEdge` replaces the edge stored either way, and `deleteEdge` deletes it
-whichever way it points. (`types.ts` names the fields `a`/`b`; the client keeps those names and gives them a
+whichever way it points. (The service names the fields `a`/`b`; the client keeps those names and gives them a
 direction.)
 
 ## Records
@@ -76,7 +76,7 @@ way. The server's own cascade on `deleteEngram` (its edges) is then a no-op.
 
 ## What the client assumes of the server
 
-Beyond `docs/API.md`:
+Beyond the service's API reference:
 
 - Ops of one `POST /graphs/:name/ops` land in order, in one transaction; the answer's `seq` is the graph's seq after
   them. A `409` body carries the current seq as `error.seq` (the client also reads a top-level `seq`, and doesn't

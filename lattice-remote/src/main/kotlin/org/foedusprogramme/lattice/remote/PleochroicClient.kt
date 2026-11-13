@@ -8,7 +8,7 @@ import java.net.http.HttpClient
 import java.time.Duration
 
 /**
- * The Pleochroic account service (`docs/API.md` in standalone-service): bearer-authenticated JSON at [baseUrl], with
+ * The Pleochroic account service: bearer-authenticated JSON at [baseUrl], with
  * errors as [PleochroicApiException] and an unreachable service as [PleochroicUnreachableException]. The API key is
  * sent only in the `Authorization` header: it is never logged nor put in a message, and [toString] leaves it out.
  */
